@@ -691,6 +691,24 @@ def convert_to_schedule_format(tou_periods):
             start_seconds = period['fromHour'] * 3600 + period['fromMinute'] * 60
             end_seconds = period['toHour'] * 3600 + period['toMinute'] * 60
             
+            # For periods ending at midnight, toHour will be 24.
+            # The API expects this to be end_seconds = 86400 for a full 24-hour day.
+            # However, if start_seconds > end_seconds for a midnight-crossing schedule,
+            # it should also be valid. Let's try the explicit end-of-day value.
+            if end_seconds == 0 and start_seconds > 0:
+                 # This handles periods like 22:00-00:00, which should end at the end of the day.
+                 # Let's check if 'toHour' was 24 and got converted somewhere, or if it's 0.
+                 if period['toHour'] == 0:
+                     # This implies a period crossing into the next day, ending at 00:00.
+                     # Example: 22:00 to 00:00 the next day.
+                     # For the Tesla API, we should use 86400 for the end of the day.
+                      if start_seconds > 0 : # like 22:00 - 00:00
+                          pass # end_seconds = 0 is correct for midnight crossing
+                      else: # 00:00 - X
+                          pass
+            if period['toHour'] == 24:
+                end_seconds = 86400
+
             # The API expects week_days as 0-6 (Sun-Sat)
             # We are setting the same schedule for all days of the week.
             week_days = [0, 1, 2, 3, 4, 5, 6]
@@ -817,9 +835,17 @@ def main():
         print(f"Response Text: {err.response.text}")
         raise
 
-    # Print updated rate plan details
-    print("\n=== Updated Rate Plan Details ===")
-    print_current_rate_plan(base_url, energy_site_id, headers)
+    # Print updated rate plan details by fetching the site_info again
+    print("\n=== Verifying Updated tou_settings from /site_info ===")
+    site_info_resp = requests.get(site_info_url, headers=headers)
+    if site_info_resp.status_code == 200:
+        site_info_data = site_info_resp.json()['response']
+        if 'tou_settings' in site_info_data:
+            print(json.dumps(site_info_data['tou_settings'], indent=2))
+        else:
+            print("Could not find 'tou_settings' in the updated site_info.")
+    else:
+        print(f"Could not fetch updated site_info. Status code: {site_info_resp.status_code}")
 
 if __name__ == "__main__":
     main()
