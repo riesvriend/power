@@ -411,6 +411,267 @@ def print_current_rate_plan(base_url: str, energy_site_id: int, headers: dict):
     except KeyError as e:
         print(f"Unexpected response format: {e}")
 
+def configure_rate_plan_from_prices(dayahead_prices, buy_fee=BUY_FEE, sell_fee=SELL_FEE, energy_tax=0.15, apply_today=False):
+    """
+    Configure a rate plan based on day-ahead prices that matches the structure
+    from the print_current_rate_plan example.
+
+    This function creates 4 dynamic rate bands based on price percentiles (25% each):
+    - SUPER_OFF_PEAK: 25% lowest rates
+    - OFF_PEAK: Next 25% rates
+    - PARTIAL_PEAK: Next 25% rates
+    - ON_PEAK: 25% highest rates
+
+    ✨ NEW: Can apply rates for today OR tomorrow during the current day!
+
+    Args:
+        dayahead_prices: Dictionary mapping datetime to EUR/MWh prices from get_dayahead_prices
+        buy_fee: Additional fee for buy rate in EUR/kWh (default: BUY_FEE)
+        sell_fee: Adjustment for sell rate in EUR/kWh (default: SELL_FEE)
+        energy_tax: Energy tax in EUR/kWh (default: 0.15)
+        apply_today: If True, applies today's rates instead of tomorrow's (for early morning execution)
+
+    Returns:
+        Tuple of (rate_plan_dict, today_hour_assignments, tomorrow_hour_assignments)
+        Returns the rate plan for the selected day (today or tomorrow)
+
+    Usage Examples:
+        # Apply tomorrow's rates (default behavior)
+        rate_plan, today_assign, tomorrow_assign = configure_rate_plan_from_prices(prices)
+
+        # Apply today's rates (for early morning execution)
+        rate_plan, today_assign, tomorrow_assign = configure_rate_plan_from_prices(prices, apply_today=True)
+    """
+
+    # Get today's date for processing today's and tomorrow's data
+    today = datetime.now()
+    tomorrow = today + timedelta(days=1)
+
+    # Separate prices for today and tomorrow
+    # We'll calculate rate bands for both days but only apply tomorrow's to the Powerwall
+    today_prices = {}
+    tomorrow_prices = {}
+
+    for dt, price_mwh in dayahead_prices.items():
+        price_kwh = price_mwh / 1000.0
+        # Buy rate = market price + energy tax + additional fee
+        buy_rate = price_kwh + energy_tax + buy_fee
+        # Sell rate = market price + energy tax + sell fee adjustment
+        sell_rate = price_kwh + energy_tax + sell_fee
+
+        # Determine if this is today or tomorrow
+        dt_date = dt.date()
+        if dt_date == today.date():
+            today_prices[dt.hour] = {
+                'buy': round(buy_rate, 4),
+                'sell': round(sell_rate, 4),
+                'raw_price': price_kwh
+            }
+        elif dt_date == tomorrow.date():
+            tomorrow_prices[dt.hour] = {
+                'buy': round(buy_rate, 4),
+                'sell': round(sell_rate, 4),
+                'raw_price': price_kwh
+            }
+
+    def create_rate_bands(hourly_data):
+        # Create 4 rate bands based on price percentiles for a given day's data
+        if not hourly_data:
+            return {}, {}
+
+        # Sort hours by buy rate (ascending)
+        sorted_hours = sorted(hourly_data.items(), key=lambda x: x[1]['buy'])
+
+        total_hours = len(sorted_hours)
+        hours_per_band = total_hours // 4
+
+        # Create rate bands with percentile-based grouping
+        rate_bands = {}
+        hour_assignments = {}
+
+        # SUPER_OFF_PEAK: 25% lowest rates
+        band_hours = sorted_hours[:hours_per_band]
+        if band_hours:
+            avg_buy = sum(h[1]['buy'] for h in band_hours) / len(band_hours)
+            avg_sell = sum(h[1]['sell'] for h in band_hours) / len(band_hours)
+            rate_bands["SUPER_OFF_PEAK"] = {'buy': round(avg_buy, 4), 'sell': round(avg_sell, 4)}
+            hour_assignments["SUPER_OFF_PEAK"] = [h[0] for h in band_hours]
+
+        # OFF_PEAK: Next 25%
+        band_hours = sorted_hours[hours_per_band:2*hours_per_band]
+        if band_hours:
+            avg_buy = sum(h[1]['buy'] for h in band_hours) / len(band_hours)
+            avg_sell = sum(h[1]['sell'] for h in band_hours) / len(band_hours)
+            rate_bands["OFF_PEAK"] = {'buy': round(avg_buy, 4), 'sell': round(avg_sell, 4)}
+            hour_assignments["OFF_PEAK"] = [h[0] for h in band_hours]
+
+        # PARTIAL_PEAK: Next 25%
+        band_hours = sorted_hours[2*hours_per_band:3*hours_per_band]
+        if band_hours:
+            avg_buy = sum(h[1]['buy'] for h in band_hours) / len(band_hours)
+            avg_sell = sum(h[1]['sell'] for h in band_hours) / len(band_hours)
+            rate_bands["PARTIAL_PEAK"] = {'buy': round(avg_buy, 4), 'sell': round(avg_sell, 4)}
+            hour_assignments["PARTIAL_PEAK"] = [h[0] for h in band_hours]
+
+        # ON_PEAK: Highest 25%
+        band_hours = sorted_hours[3*hours_per_band:]
+        if band_hours:
+            avg_buy = sum(h[1]['buy'] for h in band_hours) / len(band_hours)
+            avg_sell = sum(h[1]['sell'] for h in band_hours) / len(band_hours)
+            rate_bands["ON_PEAK"] = {'buy': round(avg_buy, 4), 'sell': round(avg_sell, 4)}
+            hour_assignments["ON_PEAK"] = [h[0] for h in band_hours]
+
+        return rate_bands, hour_assignments
+
+    def create_tou_periods(hour_assignments):
+        # Create TOU periods from hour assignments, grouping consecutive hours
+        tou_periods = {}
+
+        for period_name, hours in hour_assignments.items():
+            if not hours:
+                tou_periods[period_name] = []
+                continue
+
+            # Sort hours and group consecutive hours
+            sorted_hours = sorted(hours)
+            periods = []
+            current_start = sorted_hours[0]
+            current_end = sorted_hours[0]
+
+            for hour in sorted_hours[1:]:
+                if hour == current_end + 1:
+                    current_end = hour
+                else:
+                    # Create period for previous group
+                    periods.append({
+                        "fromDayOfWeek": 0,
+                        "toDayOfWeek": 6,
+                        "fromHour": current_start,
+                        "fromMinute": 0,
+                        "toHour": current_end + 1,  # +1 to make it inclusive
+                        "toMinute": 0
+                    })
+                    current_start = hour
+                    current_end = hour
+
+            # Add the last period
+            periods.append({
+                "fromDayOfWeek": 0,
+                "toDayOfWeek": 6,
+                "fromHour": current_start,
+                "fromMinute": 0,
+                "toHour": current_end + 1,  # +1 to make it inclusive
+                "toMinute": 0
+            })
+
+            tou_periods[period_name] = periods
+
+        return tou_periods
+
+    # Create rate bands for today and tomorrow
+    today_rate_bands, today_hour_assignments = create_rate_bands(today_prices)
+    tomorrow_rate_bands, tomorrow_hour_assignments = create_rate_bands(tomorrow_prices)
+
+    # Create TOU periods for today and tomorrow
+    today_tou_periods = create_tou_periods(today_hour_assignments)
+    tomorrow_tou_periods = create_tou_periods(tomorrow_hour_assignments)
+
+    # Choose which day's rates to apply based on apply_today parameter
+    if apply_today:
+        active_rate_bands = today_rate_bands
+        active_tou_periods = today_tou_periods
+        rate_plan_name = "Dynamic Market Rates (Today)"
+        debug_message = "Today's rates (applied via Active season - early morning execution):"
+    else:
+        active_rate_bands = tomorrow_rate_bands
+        active_tou_periods = tomorrow_tou_periods
+        rate_plan_name = "Dynamic Market Rates (Tomorrow)"
+        debug_message = "Tomorrow's rates (applied via Active season - runs daily before midnight):"
+
+    # Create a clean rate plan structure
+    rate_plan = {
+        "name": rate_plan_name,
+        "utility": "Per hour",
+        "daily_charges": [
+            {
+                "amount": 0,
+                "name": "Charge"
+            }
+        ],
+        "demand_charges": {
+            "ALL": {
+                "ALL": 0
+            },
+            "Active": {},     # Active season with selected day's rates
+            "Inactive": {}    # Disabled season
+        },
+        "energy_charges": {
+            "ALL": {
+                "ALL": 0
+            },
+            "Active": active_rate_bands,   # Selected day's buy rates
+            "Inactive": {}   # Not used
+        },
+        "seasons": {
+            "Active": {  # This season contains the selected day's dynamic rates
+                "fromDay": 1,
+                "toDay": 31,
+                "fromMonth": 1,
+                "toMonth": 12,  # Covers entire year with selected day's rates
+                "tou_periods": active_tou_periods
+            },
+            "Inactive": {  # Disabled season
+                "fromDay": 0,
+                "toDay": 0,
+                "fromMonth": 0,
+                "toMonth": 0,
+                "tou_periods": {}
+            }
+        },
+        "sell_tariff": {
+            "name": rate_plan_name,
+            "utility": "Per hour",
+            "daily_charges": [
+                {
+                    "amount": 0,
+                    "name": "Charge"
+                }
+            ],
+            "demand_charges": {
+                "ALL": {
+                    "ALL": 0
+                },
+                "Active": {},
+                "Inactive": {}
+            },
+            "energy_charges": {
+                "ALL": {
+                    "ALL": 0
+                },
+                "Active": active_rate_bands,   # Selected day's sell rates
+                "Inactive": {}
+            },
+            "seasons": {
+                "Active": {  # This season contains the selected day's dynamic rates
+                    "fromDay": 1,
+                    "toDay": 31,
+                    "fromMonth": 1,
+                    "toMonth": 12,  # Covers entire year with selected day's rates
+                    "tou_periods": active_tou_periods
+                },
+                "Inactive": {  # Disabled season
+                    "fromDay": 0,
+                    "toDay": 0,
+                    "fromMonth": 0,
+                    "toMonth": 0,
+                    "tou_periods": {}
+                }
+            }
+        }
+    }
+
+    return rate_plan, today_hour_assignments, tomorrow_hour_assignments
+
 def main():
     access_token, refresh_token = get_tesla_tokens()
     headers = {'Authorization': f'Bearer {access_token}'}
@@ -442,55 +703,60 @@ def main():
     start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=0)  # Today
     end = start + timedelta(days=2)  # To cover tomorrow
     prices = get_dayahead_prices(ENTSOE_API_KEY, AREA_CODE, start, end)
-    # Get current local time
-    local_tz = pytz.timezone(LOCAL_TZ)
-    now_local = now_utc.astimezone(local_tz)
-    current_hour = now_local.hour
-    # Build periods using the trick
-    periods = []
-    today_start = start
-    tomorrow_start = start + timedelta(days=1)
-    for i in range(24):
-        start_time_str = f"{i:02d}:00"
-        end_time_str = f"{(i + 1) % 24:02d}:00"
-        if i < current_hour:
-            # Use tomorrow's price
-            dt = tomorrow_start + timedelta(hours=i)
-        else:
-            # Use today's price
-            dt = today_start + timedelta(hours=i)
-        price_mwh = prices.get(dt, 0.0)
-        price_kwh = price_mwh / 1000
-        buy_rate = price_kwh + BUY_FEE
-        sell_rate = price_kwh + SELL_FEE
-        periods.append({
-            "label": f"hour_{i:02d}",
-            "start_time": start_time_str,
-            "end_time": end_time_str,
-            "buy_rate": buy_rate,
-            "sell_rate": sell_rate
-        })
-    # Build tariff body - try simpler format
-    tariff_body = {
-        "tou_settings": {
-            "currency": "EUR",
-            "seasons": {
-                "default": {
-                    "fromMonth": 1,
-                    "fromDay": 1,
-                    "toMonth": 12,
-                    "toDay": 31,
-                    "tou_periods": periods
-                }
-            }
-        }
-    }
-    # Set the tariff
-    tariff_url = base_url + f'/api/1/energy_sites/{energy_site_id}/time_of_use_settings'
-    response = requests.post(tariff_url, headers=headers, json=tariff_body)
+
+    # Determine whether to apply today's or tomorrow's rates
+    # If it's before noon UTC (can vary by timezone), we can still apply today's rates
+    # Otherwise, apply tomorrow's rates for the next day
+    current_hour_utc = now_utc.hour
+    apply_today_rates = current_hour_utc < 12  # Before noon UTC - can still set today's rates
+
+    # Allow manual override via environment variable for testing
+    manual_override = os.getenv('TESLA_APPLY_TODAY_RATES')
+    if manual_override is not None:
+        apply_today_rates = manual_override.lower() in ('true', '1', 'yes')
+        print(f"🔧 Manual override detected: apply_today_rates = {apply_today_rates}")
+
+    if apply_today_rates:
+        print("⏰ Early execution detected - applying TODAY'S rates to Powerwall")
+        print("(This allows you to set rates during the current day)")
+    else:
+        print("🌙 Late execution - applying TOMORROW'S rates to Powerwall")
+        print("(This is the standard before-midnight execution)")
+
+    # Configure rate plan based on day-ahead prices
+    rate_plan, today_hour_assignments, tomorrow_hour_assignments = configure_rate_plan_from_prices(
+        prices, apply_today=apply_today_rates
+    )
+
+    # Print rate band assignments for debugging
+    print("\n=== Dynamic Rate Band Assignments ===")
+    if apply_today_rates:
+        print("Today's rates (applied via Active season - early execution):")
+        for period, hours in today_hour_assignments.items():
+            print(f"  {period}: Hours {sorted(hours)}")
+        print("\nTomorrow's rates (calculated for reference - not applied):")
+        for period, hours in tomorrow_hour_assignments.items():
+            print(f"  {period}: Hours {sorted(hours)}")
+        print("\n✅ Today's rates will be applied to your Powerwall.")
+    else:
+        print("Tomorrow's rates (applied via Active season - standard execution):")
+        for period, hours in tomorrow_hour_assignments.items():
+            print(f"  {period}: Hours {sorted(hours)}")
+        print("\nToday's rates (calculated for reference - not applied):")
+        for period, hours in today_hour_assignments.items():
+            print(f"  {period}: Hours {sorted(hours)}")
+        print("\n✅ Tomorrow's rates will be applied to your Powerwall.")
+
+    # Print the configured rate plan for verification
+    print("\n=== Configured Rate Plan from Day-Ahead Prices ===")
+    print(json.dumps(rate_plan, indent=2))
+
+    # Set the complete rate plan
+    tariff_url = base_url + f'/api/1/energy_sites/{energy_site_id}/tariff_rate'
+    response = requests.post(tariff_url, headers=headers, json=rate_plan)
     response.raise_for_status()
-    print("Tariff updated successfully.")
-    print(f"Tariff update response: {response.json()}")
+    print("Rate plan updated successfully.")
+    print(f"Rate plan update response: {response.json()}")
 
     # Print updated rate plan details
     print("\n=== Updated Rate Plan Details ===")
