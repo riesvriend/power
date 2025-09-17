@@ -71,7 +71,7 @@
             "request": "launch",
             "module": "unittest",
             "args": [
-                "test_powerrates.TestEntsoeApiKey",
+                "test_powerrates.TestPowerwallConnectivity",
                 "-v"
             ],
             "console": "integratedTerminal",

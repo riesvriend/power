@@ -1,12 +1,9 @@
 import base64
 import hashlib
-import random
 import webbrowser
 import urllib.parse
 import requests
 from datetime import datetime, timedelta, timezone
-from urllib.request import urlopen, Request
-from xml.etree import ElementTree
 import json
 import os
 import ssl
@@ -14,139 +11,74 @@ import ssl
 # Require pip install pytz requests
 import pytz
 
+# anwb_prices.py
+from anwb_prices import fetch_anwb_prices
 
-def create_ssl_context():
-    """Create SSL context that handles certificate verification issues on macOS."""
-    try:
-        # Try to create a context with default certificate verification
-        context = ssl.create_default_context()
-        context.check_hostname = True
-        context.verify_mode = ssl.CERT_REQUIRED
-        return context
-    except Exception:
-        # Fallback: Create context that doesn't verify certificates
-        # This is less secure but handles macOS certificate issues
-        print("Warning: Using SSL context without certificate verification")
-        print(
-            "For better security, run: /Applications/Python 3.12/Install Certificates.command"
-        )
-        context = ssl._create_unverified_context()
-        return context
+"""
+
+- The goal of this script is to set the buy and sell rates for the next day into the Tesla Powerwall, using the ANWB energie API, which uses hourly rates for electricity
+- The sell rates should be set to the Marktprijs from ANWB, the buy price should be the AllInPrijs from the ABWB api.
+- We should reference the @tesla_specs.md file for the correct rate plan structure and API endpoints, as well as the tester TestPowerwallConnectivity in  @test_powerrates.py.
+These sources are validated, the current code in this file is not and has some incorrect APIs and schema's potentially
+"""
 
 
 # Placeholders
-ENTSOE_API_KEY_FILE = "entsoe_api_key.json"
-AREA_CODE = "10YNL----------L"  # For Netherlands
 LOCAL_TZ = "Europe/Amsterdam"  # Local timezone for tariff times
-BUY_FEE = 0.05  # Additional fee for buy rate in EUR/kWh (adjust as needed, e.g., taxes)
-SELL_FEE = -0.05  # Adjustment for sell rate in EUR/kWh (e.g., -fee)
 REFRESH_TOKEN_FILE = "tesla_refresh_token.json"
 
 
-def get_dayahead_prices(
-    api_key: str, area_code: str, start: datetime = None, end: datetime = None
-):
-    # Use stub implementation if API key is placeholder
-    # https://transparencyplatform.zendesk.com/hc/en-us/articles/12845911031188-How-to-get-security-token
-    if api_key == "your_entsoe_api_key_here":
-        print("Using stub ENTSOE API implementation with dummy rates")
-        if not start:
-            start = datetime.now().astimezone(timezone.utc)
-        elif start.tzinfo and start.tzinfo != timezone.utc:
-            start = start.astimezone(timezone.utc)
-        if not end:
-            end = start + timedelta(days=1)
-        elif end.tzinfo and end.tzinfo != timezone.utc:
-            end = end.astimezone(timezone.utc)
+def get_dayahead_prices():
+    """
+    Fetch day-ahead prices from ANWB API for today and tomorrow.
+    Prices are returned in EUR/MWh for buy and sell.
+    """
+    cest_tz = pytz.timezone(LOCAL_TZ)
+    now_local = datetime.now(cest_tz)
 
-        # Generate dummy prices for each hour (EUR/MWh)
-        result = {}
-        current_time = start.replace(minute=0, second=0, microsecond=0)
-        while current_time < end:
-            # Generate realistic electricity prices with some variation
-            # Base price around 80-120 EUR/MWh, with daily pattern
-            hour = current_time.hour
-            if 6 <= hour <= 9 or 17 <= hour <= 20:  # Peak hours
-                base_price = 120.0
-            elif 10 <= hour <= 16:  # Mid-day
-                base_price = 90.0
-            else:  # Off-peak (night)
-                base_price = 60.0
+    prices = {}
 
-            # Add some random variation (±10 EUR/MWh)
-            price = base_price + random.uniform(-10, 10)
+    for day_offset in range(2):  # Today and tomorrow
+        target_date = now_local + timedelta(days=day_offset)
+        start_local = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_local = start_local + timedelta(days=1)
 
-            result[current_time] = round(price, 2)
-            current_time += timedelta(hours=1)
+        # Convert to UTC for API
+        utc_tz = pytz.UTC
+        start_date_utc = (
+            start_local.astimezone(utc_tz).isoformat().replace("+00:00", "Z")
+        )
+        end_date_utc = end_local.astimezone(utc_tz).isoformat().replace("+00:00", "Z")
 
-        return result
+        print(
+            f"Fetching ANWB prices for {start_local.strftime('%Y-%m-%d')} from {start_date_utc} to {end_date_utc}"
+        )
+        anwb_data = fetch_anwb_prices(
+            start_date_utc, end_date_utc, "electricity", "HOUR"
+        )
 
-    # Original ENTSOE API implementation
-    if not start:
-        start = datetime.now().astimezone(timezone.utc)
-    elif start.tzinfo and start.tzinfo != timezone.utc:
-        start = start.astimezone(timezone.utc)
-    if not end:
-        end = start + timedelta(days=1)
-    elif end.tzinfo and end.tzinfo != timezone.utc:
-        end = end.astimezone(timezone.utc)
-    fmt = "%Y%m%d%H00"
-    url = (
-        f"https://web-api.tp.entsoe.eu/api?securityToken={api_key}&documentType=A44&in_Domain={area_code}"
-        f"&out_Domain={area_code}&periodStart={start.strftime(fmt)}&periodEnd={end.strftime(fmt)}"
-    )
+        if anwb_data and "data" in anwb_data:
+            for item in anwb_data["data"]:
+                utc_dt_str = item["date"]
+                utc_dt = datetime.fromisoformat(utc_dt_str.replace("Z", "+00:00"))
 
-    # Create request with proper SSL context for macOS compatibility
-    ssl_context = create_ssl_context()
-    request = Request(url)
-    with urlopen(request, context=ssl_context) as response:
-        if response.status != 200:
-            raise Exception(f"{response.status=}")
-        xml_str = response.read().decode()
-        print(f"ENTSOE Rates xml_str: {xml_str}")
-        result = {}
-        for child in ElementTree.fromstring(xml_str):
-            if child.tag.endswith("TimeSeries"):
-                for ts_child in child:
-                    if ts_child.tag.endswith("Period"):
-                        for pe_child in ts_child:
-                            if pe_child.tag.endswith("timeInterval"):
-                                for ti_child in pe_child:
-                                    if ti_child.tag.endswith("start"):
-                                        start_time = datetime.strptime(
-                                            ti_child.text, "%Y-%m-%dT%H:%MZ"
-                                        ).replace(tzinfo=timezone.utc)
-                            elif pe_child.tag.endswith("Point"):
-                                for po_child in pe_child:
-                                    if po_child.tag.endswith("position"):
-                                        delta = int(po_child.text) - 1
-                                        time = start_time + timedelta(hours=delta)
-                                    elif po_child.tag.endswith("price.amount"):
-                                        price = float(po_child.text)
-                                        result[time] = price
-        return result
+                # Buy price is "AllInPrijs"
+                buy_price_eur_kwh = (
+                    item["values"].get("allInPrijs", 0) / 100.0
+                )  # Convert cents to EUR
+                buy_price_eur_mwh = buy_price_eur_kwh * 1000
 
+                # Sell price is "marktprijs"
+                sell_price_eur_kwh = (
+                    item["values"].get("marktprijs", 0) / 100.0
+                )  # Convert cents to EUR
+                sell_price_eur_mwh = sell_price_eur_kwh * 1000
 
-def get_entsoe_api_key():
-    """Load ENTSOE API key from local file"""
-    if os.path.exists(ENTSOE_API_KEY_FILE):
-        try:
-            with open(ENTSOE_API_KEY_FILE, "r") as f:
-                data = json.load(f)
-                api_key = data.get("api_key")
-                if api_key:
-                    print("Using saved ENTSOE API key.")
-                    return api_key
-        except json.JSONDecodeError:
-            print(
-                "Warning: Invalid JSON in ENTSOE API key file. Using placeholder implementation."
-            )
-        except Exception as e:
-            print(
-                f"Warning: Error reading ENTSOE API key file: {e}. Using placeholder implementation."
-            )
-    print("No saved ENTSOE API key found. Using placeholder implementation.")
-    return "your_entsoe_api_key_here"
+                prices[utc_dt] = {
+                    "buy": buy_price_eur_mwh,
+                    "sell": sell_price_eur_mwh,
+                }
+    return prices
 
 
 def get_tesla_tokens():
@@ -217,206 +149,10 @@ def refresh_access_token(refresh_token):
 def print_current_rate_plan(base_url: str, energy_site_id: int, headers: dict):
     """Print the current rate plan details from the Powerwall.
 
-        example response below. T
-
-        The example response shows how the rate plan is structured.
-
-        - There are max 4 rates, named     "OFF_PEAK", "ON_PEAK", "PARTIAL_PEAK", "SUPER_OFF_PEAK"
-        - The goal of this script is to set the buy rates for the next day based on the entsoe market prices+energy tax of about 15 cent per kWh+additional fee of 5 cent per kWh
-        - The sell rates should be set to the buy rates, also including tax. The user will get the full amount of the sell rate, including the energy tax.
-        - In order to set the rates for today and tomorrow, we could configure the rate plan seasons so that winter is for all dates up today, and summer is for all dates after today (tomorrow).
-
-    === Current Rate Plan Details (from /api/1/energy_sites/1689507072890170/tariff_rate) ===
-    {
-      "name": "Test",
-      "utility": "Per hour",
-      "daily_charges": [
-        {
-          "amount": 0,
-          "name": "Charge"
-        }
-      ],
-      "demand_charges": {
-        "ALL": {
-          "ALL": 0
-        },
-        "Summer": {},
-        "Winter": {}
-      },
-      "energy_charges": {
-        "ALL": {
-          "ALL": 0
-        },
-        "Summer": {
-            "OFF_PEAK": 0.2,
-            "ON_PEAK": 0.35,
-            "PARTIAL_PEAK": 0.27,
-            "SUPER_OFF_PEAK": 0.17
-        },
-        "Winter": {}
-      },
-      "seasons": {
-        "Summer": {
-          "fromDay": 1,
-          "toDay": 31,
-          "fromMonth": 1,
-          "toMonth": 12,
-          "tou_periods": {
-            "OFF_PEAK": [
-              {
-                "fromDayOfWeek": 0,
-                "toDayOfWeek": 6,
-                "fromHour": 10,
-                "fromMinute": 0,
-                "toHour": 16,
-                "toMinute": 0
-              },
-              {
-                "fromDayOfWeek": 0,
-                "toDayOfWeek": 6,
-                "fromHour": 21,
-                "fromMinute": 0,
-                "toHour": 0,
-                "toMinute": 0
-              }
-            ],
-            "ON_PEAK": [
-              {
-                "fromDayOfWeek": 0,
-                "toDayOfWeek": 6,
-                "fromHour": 16,
-                "fromMinute": 0,
-                "toHour": 21,
-                "toMinute": 0
-              }
-            ],
-            "PARTIAL_PEAK": [
-              {
-                "fromDayOfWeek": 0,
-                "toDayOfWeek": 6,
-                "fromHour": 6,
-                "fromMinute": 0,
-                "toHour": 10,
-                "toMinute": 0
-              }
-            ],
-            "SUPER_OFF_PEAK": [
-              {
-                "fromDayOfWeek": 0,
-                "toDayOfWeek": 6,
-                "fromHour": 0,
-                "fromMinute": 0,
-                "toHour": 6,
-                "toMinute": 0
-              }
-            ]
-          }
-        },
-        "Winter": {
-          "fromDay": 0,
-          "toDay": 0,
-          "fromMonth": 0,
-          "toMonth": 0,
-          "tou_periods": {}
-        }
-      },
-      "sell_tariff": {
-        "name": "Test",
-        "utility": "Per hour",
-        "daily_charges": [
-          {
-            "amount": 0,
-            "name": "Charge"
-          }
-        ],
-        "demand_charges": {
-          "ALL": {
-            "ALL": 0
-          },
-          "Summer": {},
-          "Winter": {}
-        },
-        "energy_charges": {
-          "ALL": {
-            "ALL": 0
-          },
-          "Summer": {
-            "OFF_PEAK": 0.05,
-            "ON_PEAK": 0.2,
-            "PARTIAL_PEAK": 0.12,
-            "SUPER_OFF_PEAK": 0.02
-          },
-          "Winter": {}
-        },
-        "seasons": {
-          "Summer": {
-            "fromDay": 1,
-            "toDay": 31,
-            "fromMonth": 1,
-            "toMonth": 12,
-            "tou_periods": {
-              "OFF_PEAK": [
-                {
-                  "fromDayOfWeek": 0,
-                  "toDayOfWeek": 6,
-                  "fromHour": 10,
-                  "fromMinute": 0,
-                  "toHour": 16,
-                  "toMinute": 0
-                },
-                {
-                  "fromDayOfWeek": 0,
-                  "toDayOfWeek": 6,
-                  "fromHour": 21,
-                  "fromMinute": 0,
-                  "toHour": 0,
-                  "toMinute": 0
-                }
-              ],
-              "ON_PEAK": [
-                {
-                  "fromDayOfWeek": 0,
-                  "toDayOfWeek": 6,
-                  "fromHour": 16,
-                  "fromMinute": 0,
-                  "toHour": 21,
-                  "toMinute": 0
-                }
-              ],
-              "PARTIAL_PEAK": [
-                {
-                  "fromDayOfWeek": 0,
-                  "toDayOfWeek": 6,
-                  "fromHour": 6,
-                  "fromMinute": 0,
-                  "toHour": 10,
-                  "toMinute": 0
-                }
-              ],
-              "SUPER_OFF_PEAK": [
-                {
-                  "fromDayOfWeek": 0,
-                  "toDayOfWeek": 6,
-                  "fromHour": 0,
-                  "fromMinute": 0,
-                  "toHour": 6,
-                  "toMinute": 0
-                }
-              ]
-            }
-          },
-          "Winter": {
-            "fromDay": 0,
-            "toDay": 0,
-            "fromMonth": 0,
-            "toMonth": 0,
-            "tou_periods": {}
-          }
-        }
-      }
-    }
-
-
+    - The goal of this script is to set the buy and sell rates for the next day into the Tesla Powerwall
+    - The sell rates should be set to the Marktprijs from ANWB, the buy price should be the AllInPrijs from the ABWB api.
+    - We should reference the @tesla_specs.md file for the correct rate plan structure and API endpoints, as well as the tester TestPowerwallConnectivity in  @test_powerrates.py.
+    These sources are validated, the current code in this file is not and has some incorrect APIs and schema's potentially
     """
     try:
         # Use single endpoint for getting TOU settings
@@ -488,14 +224,9 @@ def print_current_rate_plan(base_url: str, energy_site_id: int, headers: dict):
 
 def configure_rate_plan_from_prices(
     dayahead_prices,
-    buy_fee=BUY_FEE,
-    sell_fee=SELL_FEE,
-    energy_tax=0.15,
-    apply_today=False,
 ):
     """
-    Configure a rate plan based on day-ahead prices that matches the structure
-    from the print_current_rate_plan example.
+    Configure a rate plan based on day-ahead prices for the next day.
 
     This function creates 4 dynamic rate bands based on price percentiles (25% each):
     - SUPER_OFF_PEAK: 25% lowest rates
@@ -503,56 +234,28 @@ def configure_rate_plan_from_prices(
     - PARTIAL_PEAK: Next 25% rates
     - ON_PEAK: 25% highest rates
 
-    ✨ NEW: Can apply rates for today OR tomorrow during the current day!
-
     Args:
         dayahead_prices: Dictionary mapping datetime to EUR/MWh prices from get_dayahead_prices
-        buy_fee: Additional fee for buy rate in EUR/kWh (default: BUY_FEE)
-        sell_fee: Adjustment for sell rate in EUR/kWh (default: SELL_FEE)
-        energy_tax: Energy tax in EUR/kWh (default: 0.15)
-        apply_today: If True, applies today's rates instead of tomorrow's (for early morning execution)
 
     Returns:
-        Tuple of (rate_plan_dict, today_hour_assignments, tomorrow_hour_assignments)
-        Returns the rate plan for the selected day (today or tomorrow)
-
-    Usage Examples:
-        # Apply tomorrow's rates (default behavior)
-        rate_plan, today_assign, tomorrow_assign = configure_rate_plan_from_prices(prices)
-
-        # Apply today's rates (for early morning execution)
-        rate_plan, today_assign, tomorrow_assign = configure_rate_plan_from_prices(prices, apply_today=True)
+        Tuple of (rate_plan_dict, tomorrow_hour_assignments, active_tou_periods)
     """
 
-    # Get today's date for processing today's and tomorrow's data
+    # Get today's date for processing tomorrow's data
     today = datetime.now()
     tomorrow = today + timedelta(days=1)
 
-    # Separate prices for today and tomorrow
-    # We'll calculate rate bands for both days but only apply tomorrow's to the Powerwall
-    today_prices = {}
+    # Process prices for tomorrow
     tomorrow_prices = {}
 
     for dt, price_mwh in dayahead_prices.items():
-        price_kwh = price_mwh / 1000.0
-        # Buy rate = market price + energy tax + additional fee
-        buy_rate = price_kwh + energy_tax + buy_fee
-        # Sell rate = market price + energy tax + sell fee adjustment
-        sell_rate = price_kwh + energy_tax + sell_fee
+        buy_rate_kwh = price_mwh["buy"] / 1000.0
+        sell_rate_kwh = price_mwh["sell"] / 1000.0
 
-        # Determine if this is today or tomorrow
-        dt_date = dt.date()
-        if dt_date == today.date():
-            today_prices[dt.hour] = {
-                "buy": round(buy_rate, 4),
-                "sell": round(sell_rate, 4),
-                "raw_price": price_kwh,
-            }
-        elif dt_date == tomorrow.date():
+        if dt.date() == tomorrow.date():
             tomorrow_prices[dt.hour] = {
-                "buy": round(buy_rate, 4),
-                "sell": round(sell_rate, 4),
-                "raw_price": price_kwh,
+                "buy": round(buy_rate_kwh, 4),
+                "sell": round(sell_rate_kwh, 4),
             }
 
     def create_rate_bands(hourly_data):
@@ -660,30 +363,19 @@ def configure_rate_plan_from_prices(
             tou_periods[period_name] = periods
         return tou_periods
 
-    # Create rate bands for today and tomorrow
-    today_rate_bands, today_hour_assignments = create_rate_bands(today_prices)
+    # Create rate bands for tomorrow
     tomorrow_rate_bands, tomorrow_hour_assignments = create_rate_bands(tomorrow_prices)
 
-    # Create TOU periods for today and tomorrow
-    today_tou_periods = create_tou_periods(today_hour_assignments)
-    tomorrow_tou_periods = create_tou_periods(tomorrow_hour_assignments)
-
-    # Choose which day's rates to apply based on apply_today parameter
-    if apply_today:
-        active_rate_bands = today_rate_bands
-        active_tou_periods = today_tou_periods
-        rate_plan_name = "Dynamic Market Rates (Today)"
-    else:
-        active_rate_bands = tomorrow_rate_bands
-        active_tou_periods = tomorrow_tou_periods
-        rate_plan_name = "Dynamic Market Rates (Tomorrow)"
+    # Create TOU periods for tomorrow
+    active_tou_periods = create_tou_periods(tomorrow_hour_assignments)
+    rate_plan_name = "Dynamic Market Rates (Tomorrow)"
 
     # Create separate dictionaries for buy and sell energy charges
     buy_energy_charges = {
-        band: rates["buy"] for band, rates in active_rate_bands.items()
+        band: rates["buy"] for band, rates in tomorrow_rate_bands.items()
     }
     sell_energy_charges = {
-        band: rates["sell"] for band, rates in active_rate_bands.items()
+        band: rates["sell"] for band, rates in tomorrow_rate_bands.items()
     }
 
     # Create a clean rate plan structure
@@ -747,176 +439,9 @@ def configure_rate_plan_from_prices(
 
     return (
         rate_plan,
-        today_hour_assignments,
         tomorrow_hour_assignments,
         active_tou_periods,
     )
-
-
-def detect_overlapping_periods(schedule):
-    """Check for overlapping time periods in the TOU schedule"""
-    print("\n🔍 ANALYZING SCHEDULE FOR OVERLAPS...")
-
-    overlaps_found = []
-
-    for i, period1 in enumerate(schedule):
-        start1 = period1["start_seconds"]
-        end1 = period1["end_seconds"] if period1["end_seconds"] != 0 else 86400
-        target1 = period1["target"]
-
-        for j, period2 in enumerate(schedule):
-            if i >= j:  # Don't compare with self or already compared pairs
-                continue
-
-            start2 = period2["start_seconds"]
-            end2 = period2["end_seconds"] if period2["end_seconds"] != 0 else 86400
-            target2 = period2["target"]
-
-            # Check for overlap
-            if start1 < end2 and start2 < end1:
-                # Convert to readable times
-                start1_h = start1 // 3600
-                start1_m = (start1 % 3600) // 60
-                end1_h = end1 // 3600 if end1 < 86400 else 0
-                end1_m = (end1 % 3600) // 60 if end1 < 86400 else 0
-
-                start2_h = start2 // 3600
-                start2_m = (start2 % 3600) // 60
-                end2_h = end2 // 3600 if end2 < 86400 else 0
-                end2_m = (end2 % 3600) // 60 if end2 < 86400 else 0
-
-                overlaps_found.append(
-                    {
-                        "period1": f"{target1}: {start1_h:02d}:{start1_m:02d}-{end1_h:02d}:{end1_m:02d}",
-                        "period2": f"{target2}: {start2_h:02d}:{start2_m:02d}-{end2_h:02d}:{end2_m:02d}",
-                    }
-                )
-
-    if overlaps_found:
-        print("❌ OVERLAPS DETECTED:")
-        for overlap in overlaps_found:
-            print(f"  ⚠️  {overlap['period1']} overlaps with {overlap['period2']}")
-        return True
-    else:
-        print("✅ No overlapping periods detected")
-        return False
-
-
-def convert_to_schedule_format_simplified(tou_periods):
-    """
-    Simplified version that creates only 2 TOU periods (off_peak and peak)
-    to work around Tesla API limitations.
-    """
-    print("🔧 Using SIMPLIFIED TOU format (2 periods only)")
-
-    # Group all off-peak periods together
-    off_peak_periods = []
-    peak_periods = []
-
-    for period_name, periods in tou_periods.items():
-        if period_name in ["SUPER_OFF_PEAK", "OFF_PEAK"]:
-            off_peak_periods.extend(periods)
-        elif period_name in ["PARTIAL_PEAK", "ON_PEAK"]:
-            peak_periods.extend(periods)
-
-    def fill_small_gaps(intervals, max_gap_seconds=3600):  # Default 1 hour
-        """Fill small gaps between intervals to create larger merged blocks"""
-        if len(intervals) <= 1:
-            return intervals
-
-        filled = [intervals[0]]
-        for start, end in intervals[1:]:
-            last_start, last_end = filled[-1]
-            gap = start - last_end
-
-            if gap <= max_gap_seconds:
-                # Fill the gap by extending the previous interval
-                filled[-1] = (last_start, end)
-                print(
-                    f"    🔗 Filled {gap//3600}h gap: {last_start//3600:2d}-{end//3600:2d}"
-                )
-            else:
-                filled.append((start, end))
-
-        return filled
-
-    def merge_periods(periods_list, target_name):
-        """Merge overlapping or adjacent periods of the same type"""
-        if not periods_list:
-            return []
-
-        # Debug: show input periods
-        print(f"  📊 Input {target_name} periods:")
-        for period in periods_list:
-            if isinstance(period, dict):
-                start_h = period["fromHour"]
-                end_h = period["toHour"]
-                if end_h == 0:
-                    end_h = 24
-                print(f"    {start_h:2d}:00 - {end_h:2d}:00")
-
-        # Convert to seconds and sort
-        intervals = []
-        for period in periods_list:
-            if isinstance(period, dict):
-                start_seconds = period["fromHour"] * 3600 + period["fromMinute"] * 60
-                end_seconds = period["toHour"] * 3600 + period["toMinute"] * 60
-                if end_seconds == 0:
-                    end_seconds = 86400
-                intervals.append((start_seconds, end_seconds))
-
-        if not intervals:
-            return []
-
-        # Sort by start time
-        intervals.sort(key=lambda x: x[0])
-
-        print(f"  🔄 Merging {len(intervals)} intervals...")
-
-        # Merge overlapping/adjacent intervals
-        merged = [intervals[0]]
-        for start, end in intervals[1:]:
-            last_start, last_end = merged[-1]
-            if start <= last_end:  # Overlapping or adjacent
-                merged[-1] = (last_start, max(last_end, end))
-                print(f"    ✅ Merged: {last_start//3600:2d}-{end//3600:2d}")
-            else:
-                merged.append((start, end))
-                print(f"    ➕ Added separate: {start//3600:2d}-{end//3600:2d}")
-
-        # Option 2: More aggressive merging with small gap filling
-        print(f"  🔄 Attempting gap filling (≤ 2 hours)...")
-        merged = fill_small_gaps(merged, max_gap_seconds=7200)  # 2 hours
-
-        print(f"  ✅ Result: {len(merged)} merged {target_name} periods")
-
-        # Convert back to schedule format
-        schedule_entries = []
-        for start_seconds, end_seconds in merged:
-            schedule_entries.append(
-                {
-                    "target": target_name,
-                    "start_seconds": start_seconds,
-                    "end_seconds": end_seconds,
-                    "week_days": [0, 1, 2, 3, 4, 5, 6],
-                }
-            )
-
-        return schedule_entries
-
-    # Create merged schedules
-    schedule = []
-    schedule.extend(merge_periods(off_peak_periods, "off_peak"))
-    schedule.extend(merge_periods(peak_periods, "peak"))
-
-    print(
-        f"✅ Simplified {len(off_peak_periods)} off-peak + {len(peak_periods)} peak periods into {len(schedule)} merged entries"
-    )
-    print(
-        "💡 Gap filling reduced schedule complexity for better Tesla API compatibility"
-    )
-
-    return schedule
 
 
 def convert_to_schedule_format(tou_periods):
@@ -976,9 +501,6 @@ def convert_to_schedule_format(tou_periods):
 
 
 def main():
-    # Load ENTSOE API key from file
-    entsoe_api_key = get_entsoe_api_key()
-
     access_token, refresh_token = get_tesla_tokens()
     headers = {"Authorization": f"Bearer {access_token}"}
     base_url = "https://owner-api.teslamotors.com"
@@ -994,9 +516,6 @@ def main():
     if not energy_site_id:
         raise ValueError("No Powerwall found in your account.")
 
-    # Print current rate plan details
-    print_current_rate_plan(base_url, energy_site_id, headers)
-
     # Set to Time-Based Control if not already
     site_info_url = base_url + f"/api/1/energy_sites/{energy_site_id}/site_info"
     site_info_resp = requests.get(site_info_url, headers=headers)
@@ -1009,157 +528,22 @@ def main():
             json={"default_real_mode": "autonomous"},
         )
 
-    # Print the tou_settings from site_info for debugging
-    site_info_data = site_info_resp.json()["response"]
-    print("\n=== BEFORE UPDATE: Current Powerwall Status ===")
-    print(f"Current real mode: {site_info_data.get('default_real_mode', 'Unknown')}")
-    if "tou_settings" in site_info_data:
-        print("\n--- Current TOU Settings ---")
-        print(json.dumps(site_info_data["tou_settings"], indent=2))
-
-        # Extract and print current schedule details
-        if "schedule" in site_info_data["tou_settings"]:
-            print("\n--- Current Schedule Breakdown ---")
-            for entry in site_info_data["tou_settings"]["schedule"]:
-                target = entry.get("target", "Unknown")
-                start_sec = entry.get("start_seconds", 0)
-                end_sec = entry.get("end_seconds", 0)
-                start_hour = start_sec // 3600
-                start_min = (start_sec % 3600) // 60
-                if end_sec == 0:
-                    end_hour = 24
-                    end_min = 0
-                else:
-                    end_hour = end_sec // 3600
-                    end_min = (end_sec % 3600) // 60
-                week_days = entry.get("week_days", [])
-                print(
-                    f"  {target.upper()}: {start_hour:02d}:{start_min:02d} - {end_hour:02d}:{end_min:02d} (Days: {week_days})"
-                )
-    else:
-        print("No TOU settings found in current configuration.")
-
-    # Try to get current rate plan for buy/sell rates
-    try:
-        tariff_url = base_url + f"/api/1/energy_sites/{energy_site_id}/tariff_rate"
-        print(f"\n--- Attempting to fetch tariff rates from: {tariff_url} ---")
-        tariff_resp = requests.get(tariff_url, headers=headers)
-        print(f"Tariff API Response Status: {tariff_resp.status_code}")
-
-        if tariff_resp.status_code == 200:
-            tariff_data = tariff_resp.json()["response"]
-            print("✅ Tariff data retrieved successfully")
-            print("\n--- Current Buy Rates (EUR/kWh) ---")
-            if (
-                "energy_charges" in tariff_data
-                and "Summer" in tariff_data["energy_charges"]
-            ):
-                for period, rate in tariff_data["energy_charges"]["Summer"].items():
-                    print(f"  {period}: {rate}")
-            else:
-                print("  No Summer energy_charges found")
-
-            print("\n--- Current Sell Rates (EUR/kWh) ---")
-            if (
-                "sell_tariff" in tariff_data
-                and "energy_charges" in tariff_data["sell_tariff"]
-                and "Summer" in tariff_data["sell_tariff"]["energy_charges"]
-            ):
-                for period, rate in tariff_data["sell_tariff"]["energy_charges"][
-                    "Summer"
-                ].items():
-                    print(f"  {period}: {rate}")
-            else:
-                print("  No Summer sell_tariff energy_charges found")
-        else:
-            print(f"❌ Tariff API failed: {tariff_resp.status_code}")
-            print(f"Response: {tariff_resp.text}")
-            print("💡 This might be expected if you haven't set custom rates yet")
-    except Exception as e:
-        print(f"❌ Could not fetch current tariff rates: {e}")
-        print("💡 This is likely normal if no custom tariff has been set")
-
-    print("\n" + "=" * 60)
-
     # Fetch prices for today and tomorrow
-    now_utc = datetime.now(timezone.utc)
-    start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
-        days=0
-    )  # Today
-    end = start + timedelta(days=2)  # To cover tomorrow
-    prices = get_dayahead_prices(entsoe_api_key, AREA_CODE, start, end)
+    prices = get_dayahead_prices()
 
-    # Determine whether to apply today's or tomorrow's rates
-    # If it's before noon UTC (can vary by timezone), we can still apply today's rates
-    # Otherwise, apply tomorrow's rates for the next day
-    current_hour_utc = now_utc.hour
-    apply_today_rates = (
-        current_hour_utc < 12
-    )  # Before noon UTC - can still set today's rates
-
-    # Allow manual override via environment variable for testing
-    manual_override = os.getenv("TESLA_APPLY_TODAY_RATES")
-    if manual_override is not None:
-        apply_today_rates = manual_override.lower() in ("true", "1", "yes")
-        print(f"🔧 Manual override detected: apply_today_rates = {apply_today_rates}")
-
-    if apply_today_rates:
-        print("⏰ Early execution detected - applying TODAY'S rates to Powerwall")
-        print("(This allows you to set rates during the current day)")
-    else:
-        print("🌙 Late execution - applying TOMORROW'S rates to Powerwall")
-        print("(This is the standard before-midnight execution)")
+    print("🌙 Applying TOMORROW'S rates to Powerwall")
 
     # Configure rate plan based on day-ahead prices
-    rate_plan, today_hour_assignments, tomorrow_hour_assignments, active_tou_periods = (
-        configure_rate_plan_from_prices(prices, apply_today=apply_today_rates)
+    rate_plan, tomorrow_hour_assignments, active_tou_periods = (
+        configure_rate_plan_from_prices(prices)
     )
-
-    # Determine debug message
-    if apply_today_rates:
-        applied_message = "Today's rates (applied via Summer season - early execution):"
-        reference_message = "Tomorrow's rates (calculated for reference - not applied):"
-        applied_assignments = today_hour_assignments
-        reference_assignments = tomorrow_hour_assignments
-        confirmation_message = "✅ Today's rates will be applied to your Powerwall."
-    else:
-        applied_message = (
-            "Tomorrow's rates (applied via Summer season - standard execution):"
-        )
-        reference_message = "Today's rates (calculated for reference - not applied):"
-        applied_assignments = tomorrow_hour_assignments
-        reference_assignments = today_hour_assignments
-        confirmation_message = "✅ Tomorrow's rates will be applied to your Powerwall."
 
     # Print rate band assignments for debugging
     print("\n=== Dynamic Rate Band Assignments ===")
-    print(applied_message)
-    for period, hours in applied_assignments.items():
+    for period, hours in tomorrow_hour_assignments.items():
         print(f"  {period}: Hours {sorted(hours)}")
-    print(f"\n{reference_message}")
-    for period, hours in reference_assignments.items():
-        print(f"  {period}: Hours {sorted(hours)}")
-    print(f"\n{confirmation_message}")
 
-    # The payload for the /time_of_use_settings endpoint needs to be a valid TOU setting.
-    # We will construct this using the `tou_settings` key.
-
-    # Check if we should use simplified TOU format (workaround for API issues)
-    use_simplified = os.getenv("TESLA_USE_SIMPLIFIED_TOU", "false").lower() in (
-        "true",
-        "1",
-        "yes",
-    )
-    if use_simplified:
-        print(
-            "\n🔧 USING SIMPLIFIED TOU FORMAT (2 periods) - set TESLA_USE_SIMPLIFIED_TOU=false to use full 4 periods"
-        )
-        schedule = convert_to_schedule_format_simplified(active_tou_periods)
-    else:
-        print(
-            "\n📊 USING FULL TOU FORMAT (4 periods) - set TESLA_USE_SIMPLIFIED_TOU=true to use simplified 2 periods"
-        )
-        schedule = convert_to_schedule_format(active_tou_periods)
+    schedule = convert_to_schedule_format(active_tou_periods)
     tou_payload = {
         "tou_settings": {"optimization_strategy": "economics", "schedule": schedule}
     }
@@ -1169,33 +553,6 @@ def main():
 
     print("\n=== Payload for POST to /time_of_use_settings ===")
     print(json.dumps(tou_payload, indent=2))
-
-    # Additional debugging: show schedule breakdown that will be sent
-    print("\n--- Schedule Breakdown Being Sent ---")
-    for entry in tou_payload["tou_settings"]["schedule"]:
-        target = entry.get("target", "Unknown")
-        start_sec = entry.get("start_seconds", 0)
-        end_sec = entry.get("end_seconds", 0)
-        start_hour = start_sec // 3600
-        start_min = (start_sec % 3600) // 60
-        if end_sec == 0:
-            end_hour = 24
-            end_min = 0
-        else:
-            end_hour = end_sec // 3600
-            end_min = (end_sec % 3600) // 60
-        week_days = entry.get("week_days", [])
-        print(
-            f"  {target}: {start_hour:02d}:{start_min:02d} - {end_hour:02d}:{end_min:02d} (Days: {week_days})"
-        )
-
-    targets_sent = {
-        entry.get("target") for entry in tou_payload["tou_settings"]["schedule"]
-    }
-    print(f"\nTargets being sent: {sorted(targets_sent)} (count: {len(targets_sent)})")
-
-    # Check for overlapping periods
-    detect_overlapping_periods(tou_payload["tou_settings"]["schedule"])
 
     try:
         print(f"\n--- Making API call to: {tariff_url} ---")
@@ -1219,234 +576,9 @@ def main():
         print(f"❌ Unexpected error during API call: {e}")
         raise
 
-    # Print updated rate plan details by fetching the site_info again
-    print("\n" + "=" * 60)
-    print("=== AFTER UPDATE: Verification ===")
-
-    # Fetch updated site_info
-    site_info_resp = requests.get(site_info_url, headers=headers)
-    if site_info_resp.status_code == 200:
-        updated_site_info_data = site_info_resp.json()["response"]
-        print(
-            f"Updated real mode: {updated_site_info_data.get('default_real_mode', 'Unknown')}"
-        )
-
-        if "tou_settings" in updated_site_info_data:
-            print("\n--- Updated TOU Settings ---")
-            print(json.dumps(updated_site_info_data["tou_settings"], indent=2))
-
-            # Extract and print updated schedule details
-            if "schedule" in updated_site_info_data["tou_settings"]:
-                print("\n--- Updated Schedule Breakdown ---")
-                for entry in updated_site_info_data["tou_settings"]["schedule"]:
-                    target = entry.get("target", "Unknown")
-                    start_sec = entry.get("start_seconds", 0)
-                    end_sec = entry.get("end_seconds", 0)
-                    start_hour = start_sec // 3600
-                    start_min = (start_sec % 3600) // 60
-                    if end_sec == 0:
-                        end_hour = 24
-                        end_min = 0
-                    else:
-                        end_hour = end_sec // 3600
-                        end_min = (end_sec % 3600) // 60
-                    week_days = entry.get("week_days", [])
-                    print(
-                        f"  {target.upper()}: {start_hour:02d}:{start_min:02d} - {end_hour:02d}:{end_min:02d} (Days: {week_days})"
-                    )
-        else:
-            print("No TOU settings found in updated configuration.")
-
-        # Try to get updated rate plan for buy/sell rates
-        try:
-            tariff_url = base_url + f"/api/1/energy_sites/{energy_site_id}/tariff_rate"
-            print(f"\n--- Checking updated tariff rates from: {tariff_url} ---")
-            tariff_resp = requests.get(tariff_url, headers=headers)
-            print(f"Updated Tariff API Response Status: {tariff_resp.status_code}")
-
-            if tariff_resp.status_code == 200:
-                updated_tariff_data = tariff_resp.json()["response"]
-                print("✅ Updated tariff data retrieved successfully")
-                print("\n--- Updated Buy Rates (EUR/kWh) ---")
-                if (
-                    "energy_charges" in updated_tariff_data
-                    and "Summer" in updated_tariff_data["energy_charges"]
-                ):
-                    for period, rate in updated_tariff_data["energy_charges"][
-                        "Summer"
-                    ].items():
-                        print(f"  {period}: {rate}")
-                else:
-                    print("  No Summer energy_charges found")
-
-                print("\n--- Updated Sell Rates (EUR/kWh) ---")
-                if (
-                    "sell_tariff" in updated_tariff_data
-                    and "energy_charges" in updated_tariff_data["sell_tariff"]
-                    and "Summer" in updated_tariff_data["sell_tariff"]["energy_charges"]
-                ):
-                    for period, rate in updated_tariff_data["sell_tariff"][
-                        "energy_charges"
-                    ]["Summer"].items():
-                        print(f"  {period}: {rate}")
-                else:
-                    print("  No Summer sell_tariff energy_charges found")
-
-                # Show complete tariff structure for debugging
-                print("\n--- Complete Tariff Structure ---")
-                print(json.dumps(updated_tariff_data, indent=2))
-            else:
-                print(f"❌ Updated tariff API failed: {tariff_resp.status_code}")
-                print(f"Response: {tariff_resp.text}")
-                print(
-                    "💡 This might indicate that TOU settings don't automatically set tariff rates"
-                )
-        except Exception as e:
-            print(f"❌ Could not fetch updated tariff rates: {e}")
-            print("💡 TOU settings and tariff rates are separate - this is expected")
-
-    else:
-        print(
-            f"Could not fetch updated site_info. Status code: {site_info_resp.status_code}"
-        )
-
-    # Compare before and after
-    print("\n--- COMPARISON SUMMARY ---")
-    if "tou_settings" in site_info_data and "tou_settings" in updated_site_info_data:
-        original_schedule = site_info_data["tou_settings"].get("schedule", [])
-        updated_schedule = updated_site_info_data["tou_settings"].get("schedule", [])
-
-        print(f"Original schedule entries: {len(original_schedule)}")
-        print(f"Updated schedule entries: {len(updated_schedule)}")
-
-        # Check if schedules are different
-        if len(original_schedule) != len(updated_schedule):
-            print("❌ Schedule length changed - potential issue")
-        else:
-            print("✅ Schedule length matches")
-
-        # Check for specific issues seen in the output
-        original_targets = {entry.get("target") for entry in original_schedule}
-        updated_targets = {entry.get("target") for entry in updated_schedule}
-        print(f"Original targets: {sorted(original_targets)}")
-        print(f"Updated targets: {sorted(updated_targets)}")
-
-        if original_targets != updated_targets:
-            print("⚠️  Target types changed - this may indicate API processing issues")
-            missing_targets = targets_sent - updated_targets
-            extra_targets = updated_targets - targets_sent
-            if missing_targets:
-                print(f"   Missing from response: {sorted(missing_targets)}")
-            if extra_targets:
-                print(f"   Extra in response: {sorted(extra_targets)}")
-
-            print("\n🔍 ANALYSIS OF POTENTIAL ISSUES:")
-            print("1. Tesla API may consolidate similar TOU periods")
-            print(
-                "2. 'super_off_peak' and 'partial_peak' might be merged into 'off_peak' and 'peak'"
-            )
-            print("3. API may have limits on number of distinct TOU periods")
-            print("4. Weekday restrictions might cause periods to be filtered")
-
-    else:
-        print("Could not compare schedules - missing TOU settings")
-
     print("\n" + "=" * 60)
     print("UPDATE PROCESS COMPLETE")
 
-    # Additional analysis for the specific issue seen
-    print("\n🔧 RECOMMENDED FIXES:")
-    print("1. Try SIMPLIFIED mode: TESLA_USE_SIMPLIFIED_TOU=true python3 powerrates.py")
-    print("2. Check for overlapping periods (see analysis above)")
-    print("3. Verify actual rate values are being set (check Tesla app)")
-    print("4. Test with fewer TOU periods to isolate the issue")
-    print("=" * 60)
-
-
-def test_overlap_detection():
-    """Quick test function to check overlap detection"""
-    test_schedule = [
-        {
-            "target": "off_peak",
-            "start_seconds": 0,
-            "end_seconds": 3600,
-            "week_days": [0, 1, 2, 3, 4, 5, 6],
-        },
-        {
-            "target": "peak",
-            "start_seconds": 3600,
-            "end_seconds": 7200,
-            "week_days": [0, 1, 2, 3, 4, 5, 6],
-        },
-        {
-            "target": "off_peak",
-            "start_seconds": 7200,
-            "end_seconds": 10800,
-            "week_days": [0, 1, 2, 3, 4, 5, 6],
-        },
-        {
-            "target": "peak",
-            "start_seconds": 3500,
-            "end_seconds": 4000,
-            "week_days": [0, 1, 2, 3, 4, 5, 6],
-        },  # This overlaps!
-    ]
-
-    print("Testing overlap detection with sample schedule...")
-    detect_overlapping_periods(test_schedule)
-
-
-def test_merge_logic():
-    """Test the period merging logic"""
-    print("\n" + "=" * 50)
-    print("TESTING PERIOD MERGING LOGIC")
-    print("=" * 50)
-
-    # Test data similar to what the script generates
-    test_tou_periods = {
-        "SUPER_OFF_PEAK": [
-            {"fromHour": 0, "fromMinute": 0, "toHour": 1, "toMinute": 0},
-            {"fromHour": 2, "fromMinute": 0, "toHour": 4, "toMinute": 0},
-            {"fromHour": 5, "fromMinute": 0, "toHour": 6, "toMinute": 0},
-        ],
-        "OFF_PEAK": [
-            {"fromHour": 1, "fromMinute": 0, "toHour": 2, "toMinute": 0},
-            {"fromHour": 4, "fromMinute": 0, "toHour": 5, "toMinute": 0},
-        ],
-        "PARTIAL_PEAK": [
-            {"fromHour": 9, "fromMinute": 0, "toHour": 10, "toMinute": 0},
-            {"fromHour": 11, "fromMinute": 0, "toHour": 12, "toMinute": 0},
-        ],
-        "ON_PEAK": [
-            {"fromHour": 6, "fromMinute": 0, "toHour": 9, "toMinute": 0},
-            {"fromHour": 10, "fromMinute": 0, "toHour": 11, "toMinute": 0},
-        ],
-    }
-
-    merged_schedule = convert_to_schedule_format_simplified(test_tou_periods)
-
-    print(f"\nMerged schedule has {len(merged_schedule)} entries:")
-    for entry in merged_schedule:
-        start_h = entry["start_seconds"] // 3600
-        start_m = (entry["start_seconds"] % 3600) // 60
-        end_h = entry["end_seconds"] // 3600
-        end_m = (entry["end_seconds"] % 3600) // 60
-        if entry["end_seconds"] == 86400:
-            end_h, end_m = 24, 0
-        print(
-            f"  {entry['target']}: {start_h:02d}:{start_m:02d} - {end_h:02d}:{end_m:02d}"
-        )
-
-    print("\nExpected result: 2-4 merged periods (fewer is better)")
-    print("=" * 50)
-
 
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1 and sys.argv[1] == "--test-overlaps":
-        test_overlap_detection()
-    elif len(sys.argv) > 1 and sys.argv[1] == "--test-merge":
-        test_merge_logic()
-    else:
-        main()
+    main()
