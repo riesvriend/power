@@ -1,0 +1,84 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Install Dependencies",
+            "type": "shell",
+            "command": "pip",
+            "args": [
+                "install",
+                "-r",
+                "requirements.txt"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": "$python"
+        },
+        {
+            "label": "Run Tests",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "-m",
+                "unittest",
+                "test_powerrates",
+                "-v"
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": "$python"
+        },
+        {
+            "label": "Run Main Script",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "powerrates.py"
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": "$python"
+        },
+        {
+            "label": "Lint Code",
+            "type": "shell",
+            "command": "python",
+            "args": [
+                "-m",
+                "flake8",
+                "--max-line-length=120",
+                "--extend-ignore=E203,W503",
+                "."
+            ],
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": "$python"
+        }
+    ]
+}

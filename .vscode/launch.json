@@ -1,0 +1,154 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run PowerRates Main Script",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/powerrates.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "preLaunchTask": ""
+        },
+        {
+            "name": "Debug PowerRates Main Script",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/powerrates.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "preLaunchTask": "",
+            "showReturnValue": true,
+            "stopOnEntry": false
+        },
+        {
+            "name": "Run PowerRates Tests",
+            "type": "python",
+            "request": "launch",
+            "module": "unittest",
+            "args": [
+                "test_powerrates",
+                "-v"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "preLaunchTask": ""
+        },
+        {
+            "name": "Debug PowerRates Tests",
+            "type": "python",
+            "request": "launch",
+            "module": "unittest",
+            "args": [
+                "test_powerrates.TestEntsoeApiKey.test_get_entsoe_api_key_file_exists_with_valid_key",
+                "-v"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "preLaunchTask": "",
+            "showReturnValue": true,
+            "stopOnEntry": false
+        },
+        {
+            "name": "Run Specific Test Class",
+            "type": "python",
+            "request": "launch",
+            "module": "unittest",
+            "args": [
+                "test_powerrates.TestEntsoeApiKey",
+                "-v"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Run ENTSOE API Connectivity Test",
+            "type": "python",
+            "request": "launch",
+            "module": "unittest",
+            "args": [
+                "test_powerrates.TestEntsoeApiKey.test_entsoe_api_connectivity_with_real_key",
+                "-v"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Run Tests with Coverage",
+            "type": "python",
+            "request": "launch",
+            "module": "unittest",
+            "args": [
+                "test_powerrates",
+                "-v"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "PYTHONPATH_COVERAGE": "1"
+            },
+            "preLaunchTask": ""
+        },
+        {
+            "name": "Debug with Environment Variables",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/powerrates.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "TESLA_USE_SIMPLIFIED_TOU": "true",
+                "TESLA_APPLY_TODAY_RATES": "false",
+                "DEBUG": "true"
+            },
+            "preLaunchTask": ""
+        },
+        {
+            "name": "Run PowerRates Main Script-test",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/powerrates.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "preLaunchTask": "",
+            "args": [
+                "--test-enable",
+                "--test-tags=${config:odoo.testTags}",
+                "--limit-time-real",
+                "0"
+            ]
+        }
+    ]
+}
