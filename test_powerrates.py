@@ -359,14 +359,14 @@ class TestPowerwallConnectivity(unittest.TestCase):
                     "schedule": [
                         {
                             "target": "off_peak",
-                            "start_seconds": 79200,  # 22:00
-                            "end_seconds": 25200,  # 07:00 (next day)
+                            "start_seconds": 0,  # 00:00
+                            "end_seconds": 21600,  # 06:00
                             "week_days": [0, 1, 2, 3, 4, 5, 6],
                         },
                         {
                             "target": "peak",
-                            "start_seconds": 25200,  # 07:00
-                            "end_seconds": 79200,  # 22:00
+                            "start_seconds": 21600,  # 06:00
+                            "end_seconds": 86400,  # 24:00
                             "week_days": [0, 1, 2, 3, 4, 5, 6],
                         },
                     ],
@@ -399,7 +399,7 @@ class TestPowerwallConnectivity(unittest.TestCase):
                                             {
                                                 "fromDayOfWeek": 0,
                                                 "toDayOfWeek": 6,
-                                                "fromHour": 22,
+                                                "fromHour": 0,
                                                 "fromMinute": 0,
                                                 "toHour": 6,
                                                 "toMinute": 0,
@@ -413,7 +413,7 @@ class TestPowerwallConnectivity(unittest.TestCase):
                                                 "toDayOfWeek": 6,
                                                 "fromHour": 6,
                                                 "fromMinute": 0,
-                                                "toHour": 22,
+                                                "toHour": 0,
                                                 "toMinute": 0,
                                             }
                                         ]
@@ -429,7 +429,7 @@ class TestPowerwallConnectivity(unittest.TestCase):
                                             {
                                                 "fromDayOfWeek": 0,
                                                 "toDayOfWeek": 6,
-                                                "fromHour": 22,
+                                                "fromHour": 0,
                                                 "fromMinute": 0,
                                                 "toHour": 6,
                                                 "toMinute": 0,
@@ -443,7 +443,7 @@ class TestPowerwallConnectivity(unittest.TestCase):
                                                 "toDayOfWeek": 6,
                                                 "fromHour": 6,
                                                 "fromMinute": 0,
-                                                "toHour": 22,
+                                                "toHour": 0,
                                                 "toMinute": 0,
                                             }
                                         ]
