@@ -151,6 +151,19 @@
             ]
         },
         {
+            "name": "Energy Zero Prices",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/energy_zero_prices.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "preLaunchTask": ""
+        },
+        {
             "name": "Run ANWB Energy Prices",
             "type": "python",
             "request": "launch",
