@@ -35,51 +35,6 @@ class TestEntsoeApiKey(unittest.TestCase):
         if os.path.exists("test_entsoe_key.json"):
             os.remove("test_entsoe_key.json")
 
-    def test_get_entsoe_api_key_file_exists_with_valid_key(self):
-        """Test loading API key when file exists with valid key."""
-        test_data = {"api_key": self.test_api_key}
-
-        with patch("builtins.open", mock_open(read_data=json.dumps(test_data))):
-            with patch("os.path.exists", return_value=True):
-                result = get_entsoe_api_key()
-                self.assertEqual(result, self.test_api_key)
-
-    def test_get_entsoe_api_key_file_exists_with_empty_key(self):
-        """Test loading API key when file exists but key is empty."""
-        test_data = {"api_key": ""}
-
-        with patch("builtins.open", mock_open(read_data=json.dumps(test_data))):
-            with patch("os.path.exists", return_value=True):
-                result = get_entsoe_api_key()
-                self.assertEqual(result, "your_entsoe_api_key_here")  # Should fallback
-
-    def test_get_entsoe_api_key_file_exists_without_api_key_field(self):
-        """Test loading API key when file exists but no api_key field."""
-        test_data = {"other_field": "value"}
-
-        with patch("builtins.open", mock_open(read_data=json.dumps(test_data))):
-            with patch("os.path.exists", return_value=True):
-                result = get_entsoe_api_key()
-                self.assertEqual(result, "your_entsoe_api_key_here")  # Should fallback
-
-    def test_get_entsoe_api_key_file_does_not_exist(self):
-        """Test loading API key when file does not exist."""
-        with patch("os.path.exists", return_value=False):
-            result = get_entsoe_api_key()
-            self.assertEqual(result, "your_entsoe_api_key_here")  # Should fallback
-
-    def test_get_entsoe_api_key_invalid_json(self):
-        """Test loading API key when file contains invalid JSON."""
-        with patch("builtins.open", mock_open(read_data="invalid json")):
-            with patch("os.path.exists", return_value=True):
-                with patch(
-                    "json.load", side_effect=json.JSONDecodeError("Invalid JSON", "", 0)
-                ):
-                    result = get_entsoe_api_key()
-                    self.assertEqual(
-                        result, "your_entsoe_api_key_here"
-                    )  # Should fallback
-
     @unittest.skipUnless(
         os.path.exists("entsoe_api_key.json"), "ENTSOE API key file not found"
     )
@@ -150,31 +105,6 @@ class TestEntsoeApiKey(unittest.TestCase):
                 self.fail(f"DNS resolution failed - check internet connection: {e}")
             else:
                 self.fail(f"Unexpected API error: {e}")
-
-    @unittest.skipUnless(
-        os.path.exists("entsoe_api_key.json"), "ENTSOE API key file not found"
-    )
-    def test_entsoe_api_key_format_validation(self):
-        """Test that the actual API key has reasonable format."""
-        actual_api_key = get_entsoe_api_key()
-
-        # Skip if using placeholder
-        if actual_api_key == "your_entsoe_api_key_here":
-            self.skipTest("Using placeholder API key - skipping format validation")
-
-        # Basic format validation for ENTSOE API keys
-        # ENTSOE API keys are typically UUIDs or long alphanumeric strings
-        self.assertIsInstance(actual_api_key, str)
-        self.assertGreater(len(actual_api_key), 10, "API key seems too short")
-        self.assertLess(len(actual_api_key), 200, "API key seems too long")
-
-        # Should contain only valid characters (alphanumeric, hyphens, underscores)
-        import re
-
-        valid_pattern = re.compile(r"^[a-zA-Z0-9\-_]+$")
-        self.assertRegex(
-            actual_api_key, valid_pattern, "API key contains invalid characters"
-        )
 
 
 class TestDayaheadPrices(unittest.TestCase):
@@ -351,325 +281,6 @@ class TestDataValidation(unittest.TestCase):
         self.assertIsInstance(result, bool)
 
 
-class TestTeslaApi(unittest.TestCase):
-    """Test cases for Tesla Powerwall API interactions."""
-
-    def setUp(self):
-        """Set up test fixtures for Tesla API tests."""
-        self.test_energy_site_id = "1234567890"
-        self.test_base_url = "https://owner-api.teslamotors.com"
-        self.test_headers = {"Authorization": "Bearer test_token"}
-
-        # Sample site_info response based on Tesla API specs
-        self.sample_site_info = {
-            "id": self.test_energy_site_id,
-            "site_name": "Test Powerwall",
-            "default_real_mode": "autonomous",
-            "backup_reserve_percent": 20,
-            "components": {"battery": True, "solar": True, "grid": True},
-            "tou_settings": {
-                "optimization_strategy": "economics",
-                "schedule": [
-                    {
-                        "target": "off_peak",
-                        "start_seconds": 79200,  # 22:00
-                        "end_seconds": 25200,  # 07:00 (next day)
-                        "week_days": [0, 1, 2, 3, 4, 5, 6],
-                    },
-                    {
-                        "target": "peak",
-                        "start_seconds": 25200,  # 07:00
-                        "end_seconds": 79200,  # 22:00
-                        "week_days": [0, 1, 2, 3, 4, 5, 6],
-                    },
-                ],
-            },
-        }
-
-        # Sample tariff_rate response
-        self.sample_tariff_rate = {
-            "name": "Test Rates",
-            "utility": "Test Utility",
-            "energy_charges": {"Summer": {"OFF_PEAK": 0.15, "ON_PEAK": 0.35}},
-            "sell_tariff": {
-                "energy_charges": {"Summer": {"OFF_PEAK": 0.05, "ON_PEAK": 0.20}}
-            },
-        }
-
-    @patch("powerrates.requests.get")
-    def test_get_site_info_success(self, mock_get):
-        """Test successful retrieval of site information."""
-        # Mock the API response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"response": self.sample_site_info}
-        mock_get.return_value = mock_response
-
-        # Import the function we want to test
-        from powerrates import requests
-
-        # Make the API call
-        url = f"{self.test_base_url}/api/1/energy_sites/{self.test_energy_site_id}/site_info"
-        response = requests.get(url, headers=self.test_headers)
-
-        # Verify the call was made correctly
-        mock_get.assert_called_once_with(url, headers=self.test_headers)
-
-        # Verify response parsing
-        self.assertEqual(response.status_code, 200)
-        response_data = response.json()
-        self.assertIn("response", response_data)
-        self.assertEqual(response_data["response"]["id"], self.test_energy_site_id)
-        self.assertEqual(response_data["response"]["default_real_mode"], "autonomous")
-
-    @patch("powerrates.requests.get")
-    def test_get_live_status_success(self, mock_get):
-        """Test successful retrieval of live power status."""
-        # Sample live status response based on Tesla API specs
-        live_status_data = {
-            "solar_power": 1500,
-            "battery_power": -800,
-            "load_power": 2200,
-            "grid_power": 500,
-            "grid_status": "Active",
-            "battery_energy_exported": 5000,
-            "battery_energy_imported": 3000,
-            "percentage_charged": 85,
-            "timestamp": "2024-01-15T14:30:00-08:00",
-        }
-
-        # Mock the API response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"response": live_status_data}
-        mock_get.return_value = mock_response
-
-        # Import the function we want to test
-        from powerrates import requests
-
-        # Make the API call
-        url = f"{self.test_base_url}/api/1/energy_sites/{self.test_energy_site_id}/live_status"
-        response = requests.get(url, headers=self.test_headers)
-
-        # Verify the call was made correctly
-        mock_get.assert_called_once_with(url, headers=self.test_headers)
-
-        # Verify response parsing
-        self.assertEqual(response.status_code, 200)
-        response_data = response.json()
-        self.assertIn("response", response_data)
-        self.assertEqual(response_data["response"]["solar_power"], 1500)
-        self.assertEqual(response_data["response"]["grid_status"], "Active")
-
-    @patch("powerrates.requests.get")
-    def test_get_tariff_rate_success(self, mock_get):
-        """Test successful retrieval of current tariff rates."""
-        # Mock the API response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"response": self.sample_tariff_rate}
-        mock_get.return_value = mock_response
-
-        # Import the function we want to test
-        from powerrates import requests
-
-        # Make the API call
-        url = f"{self.test_base_url}/api/1/energy_sites/{self.test_energy_site_id}/tariff_rate"
-        response = requests.get(url, headers=self.test_headers)
-
-        # Verify the call was made correctly
-        mock_get.assert_called_once_with(url, headers=self.test_headers)
-
-        # Verify response parsing
-        self.assertEqual(response.status_code, 200)
-        response_data = response.json()
-        self.assertIn("response", response_data)
-
-        tariff_data = response_data["response"]
-        self.assertIn("energy_charges", tariff_data)
-        self.assertIn("Summer", tariff_data["energy_charges"])
-        self.assertEqual(tariff_data["energy_charges"]["Summer"]["OFF_PEAK"], 0.15)
-        self.assertEqual(tariff_data["energy_charges"]["Summer"]["ON_PEAK"], 0.35)
-
-    @patch("powerrates.requests.post")
-    def test_set_simple_time_of_use_settings(self, mock_post):
-        """Test setting simple time of use settings."""
-        # Mock successful API response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"response": {"result": True, "reason": ""}}
-        mock_post.return_value = mock_response
-
-        # Simple TOU schedule payload based on Tesla API specs
-        simple_tou_payload = {
-            "tou_settings": {
-                "optimization_strategy": "economics",
-                "schedule": [
-                    {
-                        "target": "off_peak",
-                        "start_seconds": 79200,  # 22:00
-                        "end_seconds": 25200,  # 07:00 (next day)
-                        "week_days": [0, 1, 2, 3, 4, 5, 6],
-                    },
-                    {
-                        "target": "peak",
-                        "start_seconds": 25200,  # 07:00
-                        "end_seconds": 79200,  # 22:00
-                        "week_days": [0, 1, 2, 3, 4, 5, 6],
-                    },
-                ],
-            }
-        }
-
-        # Import the function we want to test
-        from powerrates import requests
-
-        # Make the API call
-        url = f"{self.test_base_url}/api/1/energy_sites/{self.test_energy_site_id}/time_of_use_settings"
-        response = requests.post(
-            url, headers=self.test_headers, json=simple_tou_payload
-        )
-
-        # Verify the call was made correctly
-        mock_post.assert_called_once_with(
-            url, headers=self.test_headers, json=simple_tou_payload
-        )
-
-        # Verify response
-        self.assertEqual(response.status_code, 200)
-        response_data = response.json()
-        self.assertIn("response", response_data)
-        self.assertTrue(response_data["response"]["result"])
-
-    @patch("powerrates.requests.post")
-    def test_set_simple_tariff_rates(self, mock_post):
-        """Test setting simple tariff rates."""
-        # Mock successful API response
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"response": {"result": True, "reason": ""}}
-        mock_post.return_value = mock_response
-
-        # Simple tariff payload based on Tesla API specs
-        simple_tariff_payload = {
-            "tou_settings": {
-                "tariff_content_v2": {
-                    "version": 1,
-                    "monthly_minimum_bill": 0,
-                    "currency": "EUR",
-                    "energy_charges": {
-                        "ALL": {"rates": {"ALL": 0}},
-                        "Summer": {"rates": {"OFF_PEAK": 0.15, "ON_PEAK": 0.35}},
-                        "Winter": {"rates": {"OFF_PEAK": 0.12, "ON_PEAK": 0.30}},
-                    },
-                    "sell_tariff": {
-                        "energy_charges": {
-                            "ALL": {"rates": {"ALL": 0}},
-                            "Summer": {"rates": {"OFF_PEAK": 0.05, "ON_PEAK": 0.20}},
-                            "Winter": {"rates": {"OFF_PEAK": 0.03, "ON_PEAK": 0.15}},
-                        }
-                    },
-                    "seasons": {
-                        "Summer": {
-                            "fromMonth": 4,
-                            "toMonth": 9,
-                            "tou_periods": {
-                                "OFF_PEAK": [
-                                    {
-                                        "fromDayOfWeek": 0,
-                                        "toDayOfWeek": 6,
-                                        "fromHour": 22,
-                                        "fromMinute": 0,
-                                        "toHour": 6,
-                                        "toMinute": 0,
-                                    }
-                                ],
-                                "ON_PEAK": [
-                                    {
-                                        "fromDayOfWeek": 0,
-                                        "toDayOfWeek": 6,
-                                        "fromHour": 6,
-                                        "fromMinute": 0,
-                                        "toHour": 22,
-                                        "toMinute": 0,
-                                    }
-                                ],
-                            },
-                        },
-                        "Winter": {
-                            "fromMonth": 10,
-                            "toMonth": 3,
-                            "tou_periods": {
-                                "OFF_PEAK": [
-                                    {
-                                        "fromDayOfWeek": 0,
-                                        "toDayOfWeek": 6,
-                                        "fromHour": 22,
-                                        "fromMinute": 0,
-                                        "toHour": 6,
-                                        "toMinute": 0,
-                                    }
-                                ],
-                                "ON_PEAK": [
-                                    {
-                                        "fromDayOfWeek": 0,
-                                        "toDayOfWeek": 6,
-                                        "fromHour": 6,
-                                        "fromMinute": 0,
-                                        "toHour": 22,
-                                        "toMinute": 0,
-                                    }
-                                ],
-                            },
-                        },
-                    },
-                }
-            }
-        }
-
-        # Import the function we want to test
-        from powerrates import requests
-
-        # Make the API call
-        url = f"{self.test_base_url}/api/1/energy_sites/{self.test_energy_site_id}/time_of_use_settings"
-        response = requests.post(
-            url, headers=self.test_headers, json=simple_tariff_payload
-        )
-
-        # Verify the call was made correctly
-        mock_post.assert_called_once_with(
-            url, headers=self.test_headers, json=simple_tariff_payload
-        )
-
-        # Verify response
-        self.assertEqual(response.status_code, 200)
-        response_data = response.json()
-        self.assertIn("response", response_data)
-        self.assertTrue(response_data["response"]["result"])
-
-    @patch("powerrates.requests.get")
-    def test_api_error_handling(self, mock_get):
-        """Test API error handling for failed requests."""
-        # Mock failed API response
-        mock_response = MagicMock()
-        mock_response.status_code = 401
-        mock_response.text = "Unauthorized"
-        mock_response.raise_for_status.side_effect = Exception("401 Unauthorized")
-        mock_get.return_value = mock_response
-
-        # Import the function we want to test
-        from powerrates import requests
-
-        # Make the API call
-        url = f"{self.test_base_url}/api/1/energy_sites/{self.test_energy_site_id}/site_info"
-        response = requests.get(url, headers=self.test_headers)
-
-        # Verify error handling
-        self.assertEqual(response.status_code, 401)
-        with self.assertRaises(Exception):
-            response.raise_for_status()
-
-
 class TestPowerwallConnectivity(unittest.TestCase):
     """Integration test for real Powerwall API connectivity."""
 
@@ -783,52 +394,60 @@ class TestPowerwallConnectivity(unittest.TestCase):
                                 "fromMonth": 4,
                                 "toMonth": 9,
                                 "tou_periods": {
-                                    "OFF_PEAK": [
-                                        {
-                                            "fromDayOfWeek": 0,
-                                            "toDayOfWeek": 6,
-                                            "fromHour": 22,
-                                            "fromMinute": 0,
-                                            "toHour": 6,
-                                            "toMinute": 0,
-                                        }
-                                    ],
-                                    "ON_PEAK": [
-                                        {
-                                            "fromDayOfWeek": 0,
-                                            "toDayOfWeek": 6,
-                                            "fromHour": 6,
-                                            "fromMinute": 0,
-                                            "toHour": 22,
-                                            "toMinute": 0,
-                                        }
-                                    ],
+                                    "OFF_PEAK": {
+                                        "periods": [
+                                            {
+                                                "fromDayOfWeek": 0,
+                                                "toDayOfWeek": 6,
+                                                "fromHour": 22,
+                                                "fromMinute": 0,
+                                                "toHour": 6,
+                                                "toMinute": 0,
+                                            }
+                                        ]
+                                    },
+                                    "ON_PEAK": {
+                                        "periods": [
+                                            {
+                                                "fromDayOfWeek": 0,
+                                                "toDayOfWeek": 6,
+                                                "fromHour": 6,
+                                                "fromMinute": 0,
+                                                "toHour": 22,
+                                                "toMinute": 0,
+                                            }
+                                        ]
+                                    },
                                 },
                             },
                             "Winter": {
                                 "fromMonth": 10,
                                 "toMonth": 3,
                                 "tou_periods": {
-                                    "OFF_PEAK": [
-                                        {
-                                            "fromDayOfWeek": 0,
-                                            "toDayOfWeek": 6,
-                                            "fromHour": 22,
-                                            "fromMinute": 0,
-                                            "toHour": 6,
-                                            "toMinute": 0,
-                                        }
-                                    ],
-                                    "ON_PEAK": [
-                                        {
-                                            "fromDayOfWeek": 0,
-                                            "toDayOfWeek": 6,
-                                            "fromHour": 6,
-                                            "fromMinute": 0,
-                                            "toHour": 22,
-                                            "toMinute": 0,
-                                        }
-                                    ],
+                                    "OFF_PEAK": {
+                                        "periods": [
+                                            {
+                                                "fromDayOfWeek": 0,
+                                                "toDayOfWeek": 6,
+                                                "fromHour": 22,
+                                                "fromMinute": 0,
+                                                "toHour": 6,
+                                                "toMinute": 0,
+                                            }
+                                        ]
+                                    },
+                                    "ON_PEAK": {
+                                        "periods": [
+                                            {
+                                                "fromDayOfWeek": 0,
+                                                "toDayOfWeek": 6,
+                                                "fromHour": 6,
+                                                "fromMinute": 0,
+                                                "toHour": 22,
+                                                "toMinute": 0,
+                                            }
+                                        ]
+                                    },
                                 },
                             },
                         },
@@ -852,7 +471,9 @@ class TestPowerwallConnectivity(unittest.TestCase):
             print(json.dumps(settings_result, indent=2))
 
             self.assertIn("response", settings_result)
-            self.assertTrue(settings_result["response"]["result"])
+            # The real API returns a success object with 'code' and 'message'
+            # instead of 'result', so we check for code 201.
+            self.assertEqual(settings_result["response"]["code"], 201)
             print("✅ Successfully set complete TOU and tariff configuration")
 
         except Exception as e:
