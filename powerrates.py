@@ -103,6 +103,7 @@ def get_dayahead_prices(
         if response.status != 200:
             raise Exception(f"{response.status=}")
         xml_str = response.read().decode()
+        print(f"ENTSOE Rates xml_str: {xml_str}")
         result = {}
         for child in ElementTree.fromstring(xml_str):
             if child.tag.endswith("TimeSeries"):

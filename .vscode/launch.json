@@ -71,7 +71,7 @@
             "request": "launch",
             "module": "unittest",
             "args": [
-                "test_powerrates.TestPowerwallConnectivity",
+                "test_powerrates.TestEntsoeApiKey",
                 "-v"
             ],
             "console": "integratedTerminal",
@@ -149,6 +149,19 @@
                 "--limit-time-real",
                 "0"
             ]
+        },
+        {
+            "name": "Run ANWB Energy Prices",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/anwb_prices.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "preLaunchTask": ""
         }
     ]
 }
