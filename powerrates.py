@@ -13,6 +13,7 @@ import pytz
 
 # anwb_prices.py
 from anwb_prices import fetch_anwb_prices
+from energy_zero_prices import fetch_energy_prices
 
 """
 
@@ -28,7 +29,7 @@ LOCAL_TZ = "Europe/Amsterdam"  # Local timezone for tariff times
 REFRESH_TOKEN_FILE = "tesla_refresh_token.json"
 
 
-def get_dayahead_prices():
+def get_prices_today_and_tomorrow():
     """
     Fetch day-ahead prices from ANWB API for today and tomorrow.
     If tomorrow's prices are not available, use today's prices as a fallback.
@@ -79,12 +80,60 @@ def get_dayahead_prices():
 
     if len(tomorrow_prices) < 24 and len(today_prices) >= 24:
         print(
-            "Tomorrow's prices not fully available. Using today's prices as fallback."
+            "Tomorrow's ANWB prices not fully available. Falling back to Energy Zero for tomorrow's prices."
         )
-        fallback_prices = {
-            dt + timedelta(days=1): prices for dt, prices in today_prices.items()
-        }
-        all_prices.update(fallback_prices)
+
+        # Calculate average ANWB offset from today's prices
+        offsets = [p["buy"] - p["sell"] for p in today_prices.values()]
+        avg_offset = sum(offsets) / len(offsets) if offsets else 0
+        print(f"Calculated average ANWB price offset: {avg_offset:.2f} EUR/MWh")
+
+        # Prepare dates for Energy Zero API call for tomorrow
+        local_tz = pytz.timezone(LOCAL_TZ)
+        start_tomorrow_local = local_tz.localize(
+            datetime.combine(tomorrow_local, datetime.min.time())
+        )
+        end_tomorrow_local = start_tomorrow_local + timedelta(days=1)
+
+        start_utc_ez = start_tomorrow_local.astimezone(pytz.UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        end_utc_ez = end_tomorrow_local.astimezone(pytz.UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+        print(
+            f"Fetching Energy Zero prices for tomorrow from {start_utc_ez} to {end_utc_ez}"
+        )
+        # Fetch sell prices from Energy Zero (usageType=1 for return / electricity base price)
+        energy_zero_data = fetch_energy_prices(start_utc_ez, end_utc_ez, 1)
+
+        fallback_prices = {}
+        if energy_zero_data and "Prices" in energy_zero_data:
+            for item in energy_zero_data["Prices"]:
+                utc_dt = datetime.fromisoformat(
+                    item["readingDate"].replace("Z", "+00:00")
+                )
+                # Energy Zero prices are in EUR/kWh, convert to EUR/MWh
+                sell_price_mwh = item["price"] * 1000.0
+                buy_price_mwh = sell_price_mwh + avg_offset
+
+                fallback_prices[utc_dt] = {
+                    "buy": buy_price_mwh,
+                    "sell": sell_price_mwh,
+                }
+            print(
+                f"Successfully fetched and processed {len(fallback_prices)} prices from Energy Zero."
+            )
+            all_prices.update(fallback_prices)
+        else:
+            print(
+                "Energy Zero fallback failed. Using today's ANWB prices as a last resort."
+            )
+            fallback_prices_anwb = {
+                dt + timedelta(days=1): prices for dt, prices in today_prices.items()
+            }
+            all_prices.update(fallback_prices_anwb)
     else:
         all_prices.update(tomorrow_prices)
 
@@ -346,9 +395,9 @@ def main():
         )
 
     # Fetch prices for today and tomorrow
-    prices = get_dayahead_prices()
+    prices = get_prices_today_and_tomorrow()
 
-    print("🌙 Applying TOMORROW'S rates to Powerwall")
+    print("🌙 Applying rates to Powerwall")
 
     # Configure rate plan based on day-ahead prices
     rate_plan, tomorrow_prices = configure_rate_plan_from_prices(prices)
