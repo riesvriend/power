@@ -326,6 +326,22 @@ curl -X POST \
 
 Update the time of use settings for the energy site. Visit <https://www.tesla.com/support/energy/powerwall/mobile-app/utility-rate-plans> for more information about Utility Rate Plans. The payload for this request that should be passed in for `tou_settings.tariff_content_v2` is a tariff structure.
 
+Update the time of use settings for the energy site. Visit <https://www.tesla.com/support/energy/powerwall/mobile-app/utility-rate-plans> for more information about Utility Rate Plans. The payload for this request that should be passed in for tou_settings.tariff_content_v2 is a tariff structure. Visit <https://digitalassets-energy.tesla.com/raw/upload/app/fleet-api/example-tariff/PGE-EV2-A.json> for an example. Please note the following when creating the payload:
+
+At least one season must be present. Seasons can have arbitrary names as they are just a way to distinguish rates for specific times of the year. Each season contains a tariff period specifying the start and end months/days along with its time of use periods.
+demand_charges is for tariffs that charge a fee for peak power consumption. This is not common for residential systems. Typically residential customers are only charged for the energy that they consume, energy_charges should be used in this case.
+Prices in ALL in energy_charges or demand_charges apply to all time periods. It is recommended to use the ALL field for flat/fixed tariffs instead of creating tariff periods.
+The following are valid currency strings: USD, EUR, GBP
+Time of use labels may be any string but the mobile app will only support displaying the following labels: ON_PEAK, OFF_PEAK, PARTIAL_PEAK or SUPER_OFF_PEAK.
+The tariff must pass the following validation checks:
+No overlaps of time periods
+No gaps in time periods
+No overlapping seasons or gaps between seasons
+All periods/seasons that have prices defined have time periods defined
+All periods/seasons that have time periods defined have prices
+No negative prices. Negative prices will be rounded to zero. Therefore use prices that include taxes. This will limit the frequency of negative prices occurring.
+Buy price should be >= sell price at any given time. If not, the buy price will be set equal to the sell price.
+
 **Sample Request**
 
 ```shell
