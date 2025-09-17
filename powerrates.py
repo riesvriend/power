@@ -234,101 +234,162 @@ def print_current_rate_plan(base_url: str, energy_site_id: int, headers: dict):
         print(f"Unexpected response format: {e}")
 
 
-def configure_rate_plan_from_prices(dayahead_prices):
+def configure_rate_plan_from_prices(today_tomorrow_prices):
     """
-    Configure a rate plan based on day-ahead prices for the next day, with unique rates for each hour.
+    Configure a rate plan for today and tomorrow.
+    Today's rates are set for the current day, and tomorrow's rates are set for all other days.
     """
     local_tz = pytz.timezone(LOCAL_TZ)
-    tomorrow_local_date = (datetime.now(local_tz) + timedelta(days=1)).date()
+    now_local = datetime.now(local_tz)
+    today_local_date = now_local.date()
+    tomorrow_local_date = today_local_date + timedelta(days=1)
+    yesterday_local_date = today_local_date - timedelta(days=1)
 
+    today_prices = {}
     tomorrow_prices = {}
-    for utc_dt, price_mwh in dayahead_prices.items():
+    for utc_dt, price_mwh in today_tomorrow_prices.items():
         local_dt = utc_dt.astimezone(local_tz)
-        if local_dt.date() == tomorrow_local_date:
+        if local_dt.date() == today_local_date:
+            today_prices[local_dt.hour] = {
+                "buy": round(price_mwh["buy"] / 1000.0, 4),
+                "sell": round(price_mwh["sell"] / 1000.0, 4),
+            }
+        elif local_dt.date() == tomorrow_local_date:
             tomorrow_prices[local_dt.hour] = {
                 "buy": round(price_mwh["buy"] / 1000.0, 4),
                 "sell": round(price_mwh["sell"] / 1000.0, 4),
             }
 
+    if len(today_prices) < 24:
+        print(
+            f"Warning: Missing some hourly prices for today. Found {len(today_prices)}/24 rates."
+        )
     if len(tomorrow_prices) < 24:
         print(
             f"Warning: Missing some hourly prices for tomorrow. Found {len(tomorrow_prices)}/24 rates."
         )
 
-    buy_energy_charges = {}
-    sell_energy_charges = {}
-    tou_periods = {}
+    def create_hourly_rate_structure(prices):
+        buy_energy_charges = {}
+        sell_energy_charges = {}
+        tou_periods = {}
+        for hour in range(24):
+            if hour not in prices:
+                continue
 
-    for hour in range(24):
-        if hour not in tomorrow_prices:
-            continue
+            rate_name = f"HOUR_{hour}"
+            buy_price = prices[hour]["buy"]
+            sell_price = prices[hour]["sell"]
 
-        rate_name = f"HOUR_{hour}"
-        buy_price = tomorrow_prices[hour]["buy"]
-        sell_price = tomorrow_prices[hour]["sell"]
+            if buy_price < sell_price:
+                buy_price = sell_price
 
-        if buy_price < sell_price:
-            buy_price = sell_price
+            buy_energy_charges[rate_name] = buy_price
+            sell_energy_charges[rate_name] = sell_price
+            tou_periods[rate_name] = {
+                "periods": [
+                    {
+                        "fromDayOfWeek": 0,
+                        "toDayOfWeek": 6,
+                        "fromHour": hour,
+                        "fromMinute": 0,
+                        "toHour": hour + 1 if hour < 23 else 0,
+                        "toMinute": 0,
+                    }
+                ]
+            }
+        return buy_energy_charges, sell_energy_charges, tou_periods
 
-        buy_energy_charges[rate_name] = buy_price
-        sell_energy_charges[rate_name] = sell_price
-
-        tou_periods[rate_name] = {
-            "periods": [
-                {
-                    "fromDayOfWeek": 0,
-                    "toDayOfWeek": 6,
-                    "fromHour": hour,
-                    "fromMinute": 0,
-                    "toHour": hour + 1 if hour < 23 else 0,
-                    "toMinute": 0,
-                }
-            ]
-        }
+    (
+        today_buy_charges,
+        today_sell_charges,
+        today_tou_periods,
+    ) = create_hourly_rate_structure(today_prices)
+    (
+        tomorrow_buy_charges,
+        tomorrow_sell_charges,
+        tomorrow_tou_periods,
+    ) = create_hourly_rate_structure(tomorrow_prices)
 
     rate_plan_name = "Dynamic Hourly Rates"
+
+    if today_local_date.month == 12 and today_local_date.day == 31:
+        # Special handling for the last day of the year.
+        # "PastAndToday" is only today.
+        # "Future" covers the rest of the year (Jan 1 - Dec 30).
+        past_and_today_season = {
+            "fromDay": 31,
+            "toDay": 31,
+            "fromMonth": 12,
+            "toMonth": 12,
+            "tou_periods": today_tou_periods,
+        }
+        future_season = {
+            "fromDay": 1,
+            "toDay": 30,
+            "fromMonth": 1,
+            "toMonth": 12,
+            "tou_periods": tomorrow_tou_periods,
+        }
+    else:
+        # Normal daily operation.
+        past_and_today_season = {
+            "fromDay": 1,
+            "toDay": today_local_date.day,
+            "fromMonth": 1,
+            "toMonth": today_local_date.month,
+            "tou_periods": today_tou_periods,
+        }
+        future_season = {
+            "fromDay": tomorrow_local_date.day,
+            "toDay": 31,
+            "fromMonth": tomorrow_local_date.month,
+            "toMonth": 12,
+            "tou_periods": tomorrow_tou_periods,
+        }
+
     rate_plan = {
         "version": 1,
         "name": rate_plan_name,
         "utility": "Per hour",
         "currency": "EUR",
         "daily_charges": [{"amount": 0, "name": "Charge"}],
-        "demand_charges": {"ALL": {"rates": {"ALL": 0}}, "Summer": {"rates": {}}},
+        "demand_charges": {
+            "ALL": {"rates": {"ALL": 0}},
+            "PastAndToday": {"rates": {}},
+            "Future": {"rates": {}},
+        },
         "energy_charges": {
             "ALL": {"rates": {"ALL": 0}},
-            "Summer": {"rates": buy_energy_charges},
+            "PastAndToday": {"rates": today_buy_charges},
+            "Future": {"rates": tomorrow_buy_charges},
         },
         "seasons": {
-            "Summer": {
-                "fromDay": 1,
-                "toDay": 31,
-                "fromMonth": 1,
-                "toMonth": 12,
-                "tou_periods": tou_periods,
-            }
+            "PastAndToday": past_and_today_season,
+            "Future": future_season,
         },
         "sell_tariff": {
             "name": rate_plan_name,
             "utility": "Per hour",
             "currency": "EUR",
             "daily_charges": [{"amount": 0, "name": "Charge"}],
-            "demand_charges": {"ALL": {"rates": {"ALL": 0}}, "Summer": {"rates": {}}},
+            "demand_charges": {
+                "ALL": {"rates": {"ALL": 0}},
+                "PastAndToday": {"rates": {}},
+                "Future": {"rates": {}},
+            },
             "energy_charges": {
                 "ALL": {"rates": {"ALL": 0}},
-                "Summer": {"rates": sell_energy_charges},
+                "PastAndToday": {"rates": today_sell_charges},
+                "Future": {"rates": tomorrow_sell_charges},
             },
             "seasons": {
-                "Summer": {
-                    "fromDay": 1,
-                    "toDay": 31,
-                    "fromMonth": 1,
-                    "toMonth": 12,
-                    "tou_periods": tou_periods,
-                }
+                "PastAndToday": past_and_today_season,
+                "Future": future_season,
             },
         },
     }
-    return rate_plan, tomorrow_prices
+    return rate_plan, today_prices, tomorrow_prices
 
 
 def convert_to_schedule_format(tou_periods):
@@ -395,21 +456,31 @@ def main():
         )
 
     # Fetch prices for today and tomorrow
-    prices = get_prices_today_and_tomorrow()
+    prices_today_and_tomorrow = get_prices_today_and_tomorrow()
 
     print("🌙 Applying rates to Powerwall")
 
     # Configure rate plan based on day-ahead prices
-    rate_plan, tomorrow_prices = configure_rate_plan_from_prices(prices)
+    rate_plan, today_prices, tomorrow_prices = configure_rate_plan_from_prices(
+        prices_today_and_tomorrow
+    )
 
     # Print rate band assignments for debugging
-    print("\n=== Hourly Rate Assignments (EUR/kWh) ===")
+    print("\n=== Today's Hourly Rate Assignments (EUR/kWh) ===")
+    for hour in sorted(today_prices.keys()):
+        buy_price = today_prices[hour]["buy"]
+        sell_price = today_prices[hour]["sell"]
+        print(f"  Hour {hour:02d}: Buy @ {buy_price:.4f}, Sell @ {sell_price:.4f}")
+
+    print("\n=== Tomorrow's Hourly Rate Assignments (EUR/kWh) ===")
     for hour in sorted(tomorrow_prices.keys()):
         buy_price = tomorrow_prices[hour]["buy"]
         sell_price = tomorrow_prices[hour]["sell"]
         print(f"  Hour {hour:02d}: Buy @ {buy_price:.4f}, Sell @ {sell_price:.4f}")
 
-    schedule = convert_to_schedule_format(rate_plan["seasons"]["Summer"]["tou_periods"])
+    schedule = convert_to_schedule_format(
+        rate_plan["seasons"]["PastAndToday"]["tou_periods"]
+    )
     tou_payload = {
         "tou_settings": {"schedule": schedule, "tariff_content_v2": rate_plan}
     }
