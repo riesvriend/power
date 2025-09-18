@@ -21,6 +21,7 @@ EXCLUDE_FILES=(
     ".idea"
     ".git"
     "deploy.sh"
+    "power.log"
 )
 
 echo "Starting deployment to ${REMOTE_HOST}..."
