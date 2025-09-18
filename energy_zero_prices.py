@@ -6,7 +6,7 @@ import pytz
 def fetch_energy_prices(from_date, till_date, usage_type, incl_btw=True):
     """
     Fetch energy prices from EnergyZero API.
-    - usage_type: 1 (electricity consumption), 2 (electricity return), 3 (gas)
+    - usage_type: 1 (electricity consumption), 2 (electricity return / unavailable (fake)), 3 (gas)
     """
     base_url = "https://api.energyzero.nl/v1/energyprices"
     params = {
