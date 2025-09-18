@@ -279,7 +279,10 @@ def configure_rate_plan_from_prices(today_tomorrow_prices):
 
             rate_name = f"HOUR_{hour}"
             buy_price = prices[hour]["buy"]
-            sell_price = prices[hour]["sell"]
+
+            # Per ANWB, the sell price for consumers is the same as the buy price
+            # until they sell more than they buy in a year.
+            sell_price = buy_price
 
             if buy_price < sell_price:
                 buy_price = sell_price
