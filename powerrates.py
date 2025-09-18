@@ -25,7 +25,7 @@ These sources are validated, the current code in this file is not and has some i
 
 
 # Placeholders
-LOCAL_TZ = "Europe/Amsterdam"  # Local timezone for tariff times
+LOCAL_TZ = "Europe/Amsterdam"  # Local timezone for tariff times. MUST be an IANA-compliant name.
 REFRESH_TOKEN_FILE = "tesla_refresh_token.json"
 
 
@@ -89,7 +89,6 @@ def get_prices_today_and_tomorrow():
         print(f"Calculated average ANWB price offset: {avg_offset:.2f} EUR/MWh")
 
         # Prepare dates for Energy Zero API call for tomorrow
-        local_tz = pytz.timezone(LOCAL_TZ)
         start_tomorrow_local = local_tz.localize(
             datetime.combine(tomorrow_local, datetime.min.time())
         )
