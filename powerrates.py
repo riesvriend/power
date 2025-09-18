@@ -205,6 +205,59 @@ def refresh_access_token(refresh_token):
     return tokens["access_token"], tokens["refresh_token"]
 
 
+def get_yearly_grid_import_export(base_url, energy_site_id, headers):
+    """Fetch total grid import and export for the current year."""
+    local_tz = pytz.timezone(LOCAL_TZ)
+    now_local = datetime.now(local_tz)
+    start_of_year_local = now_local.replace(
+        month=1, day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+
+    start_date_utc = start_of_year_local.astimezone(pytz.UTC).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z"
+    )
+    end_date_utc = now_local.astimezone(pytz.UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    endpoint = f"/api/1/energy_sites/{energy_site_id}/calendar_history"
+    params = {
+        "kind": "energy",
+        "start_date": start_date_utc,
+        "end_date": end_date_utc,
+        "period": "year",
+        "time_zone": LOCAL_TZ,
+    }
+    url = base_url + endpoint
+
+    print(f"\nFetching yearly energy history from: {endpoint}")
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json().get("response", {})
+
+        print(f"Full API Response for Yearly History: {json.dumps(data)}")
+
+        total_imported_wh = 0
+        total_exported_wh = 0
+        for entry in data.get("time_series", []):
+            total_imported_wh += entry.get("grid_energy_imported", 0)
+            total_exported_wh += entry.get("grid_energy_exported_from_solar", 0)
+            total_exported_wh += entry.get("grid_energy_exported_from_generator", 0)
+            total_exported_wh += entry.get("grid_energy_exported_from_battery", 0)
+
+        # Convert from Wh to kWh
+        total_imported_kwh = total_imported_wh / 1000.0
+        total_exported_kwh = total_exported_wh / 1000.0
+
+        print(
+            f"Yearly grid summary: Imported={total_imported_kwh:.2f} kWh, Exported={total_exported_kwh:.2f} kWh"
+        )
+        return total_imported_kwh, total_exported_kwh
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching yearly energy history: {e}")
+        return 0, 0
+
+
 def print_current_rate_plan(base_url: str, energy_site_id: int, headers: dict):
     """Print the current rate plan details from the Powerwall."""
     try:
@@ -234,7 +287,7 @@ def print_current_rate_plan(base_url: str, energy_site_id: int, headers: dict):
         print(f"Unexpected response format: {e}")
 
 
-def configure_rate_plan_from_prices(today_tomorrow_prices):
+def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price: bool):
     """
     Configure a rate plan for today and tomorrow.
     Today's rates are set for the current day, and tomorrow's rates are set for all other days.
@@ -269,7 +322,7 @@ def configure_rate_plan_from_prices(today_tomorrow_prices):
             f"Warning: Missing some hourly prices for tomorrow. Found {len(tomorrow_prices)}/24 rates."
         )
 
-    def create_hourly_rate_structure(prices):
+    def create_hourly_rate_structure(prices, use_market_sell_price_flag: bool):
         buy_energy_charges = {}
         sell_energy_charges = {}
         tou_periods = {}
@@ -280,9 +333,12 @@ def configure_rate_plan_from_prices(today_tomorrow_prices):
             rate_name = f"HOUR_{hour}"
             buy_price = prices[hour]["buy"]
 
-            # Per ANWB, the sell price for consumers is the same as the buy price
-            # until they sell more than they buy in a year.
-            sell_price = buy_price
+            if use_market_sell_price_flag:
+                sell_price = prices[hour]["sell"]
+            else:
+                # Per ANWB, the sell price for consumers is the same as the buy price
+                # until they sell more than they buy in a year.
+                sell_price = buy_price
 
             if buy_price < sell_price:
                 buy_price = sell_price
@@ -307,12 +363,12 @@ def configure_rate_plan_from_prices(today_tomorrow_prices):
         today_buy_charges,
         today_sell_charges,
         today_tou_periods,
-    ) = create_hourly_rate_structure(today_prices)
+    ) = create_hourly_rate_structure(today_prices, use_market_sell_price)
     (
         tomorrow_buy_charges,
         tomorrow_sell_charges,
         tomorrow_tou_periods,
-    ) = create_hourly_rate_structure(tomorrow_prices)
+    ) = create_hourly_rate_structure(tomorrow_prices, use_market_sell_price)
 
     rate_plan_name = "Dynamic Hourly Rates"
 
@@ -446,6 +502,18 @@ def main():
     if not energy_site_id:
         raise ValueError("No Powerwall found in your account.")
 
+    # Get yearly import/export stats to determine sell price strategy
+    total_imported, total_exported = get_yearly_grid_import_export(
+        base_url, energy_site_id, headers
+    )
+    use_market_sell_price = total_exported > total_imported
+    if use_market_sell_price:
+        print("Annual export exceeds import. Using market rate for sell price.")
+    else:
+        print(
+            "Annual import exceeds export. Using buy price for sell price (salderen)."
+        )
+
     # Set to Time-Based Control if not already
     site_info_url = base_url + f"/api/1/energy_sites/{energy_site_id}/site_info"
     site_info_resp = requests.get(site_info_url, headers=headers)
@@ -465,7 +533,7 @@ def main():
 
     # Configure rate plan based on day-ahead prices
     rate_plan, today_prices, tomorrow_prices = configure_rate_plan_from_prices(
-        prices_today_and_tomorrow
+        prices_today_and_tomorrow, use_market_sell_price
     )
 
     # Print rate band assignments for debugging

@@ -62,6 +62,19 @@ Returns the charging history of a wall connector. Energy values are in watt hour
 
 Returns the energy measurements of the site, aggregated to the requested period. Energy values are in watt hours. Visit <https://www.tesla.com/support/energy/powerwall/mobile-app/energy-data> for more info.
 
+Parameters
+energy_site_id path required ID field of an energy site from /api/1/products endpoint.
+
+end_date query required End date of the window to retrieve backup events in RFC3339 format. i.e. 2023-01-01T00:00:00-08:00
+
+kind query required The kind of history to be requested. 'backup' and 'energy' are supported.
+
+period query required Period of the window to retrieve backup events. This can be day, week, month, year, lifetime and should align with the window requested.
+
+start_date query required Start date of the window to retrieve backup events in RFC3339 format. i.e. 2023-01-01T00:00:00-08:00
+
+time_zone query required Timezone of the requested window in IANA name format. i.e. 'America/Los_Angeles'
+
 **Sample Request**
 
 ```shell
