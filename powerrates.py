@@ -374,6 +374,32 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
             "tou_periods": tomorrow_tou_periods,
         }
 
+    def create_tariff_structure(name, past_today_charges, future_charges, seasons):
+        """Create a tariff structure with common fields."""
+        return {
+            "name": name,
+            "utility": "Per hour",
+            "currency": "EUR",
+            "daily_charges": [{"amount": 0, "name": "Charge"}],
+            "demand_charges": {
+                "ALL": {"rates": {"ALL": 0}},
+                "PastAndToday": {"rates": {}},
+                "Future": {"rates": {}},
+            },
+            "energy_charges": {
+                "ALL": {"rates": {"ALL": 0}},
+                "PastAndToday": {"rates": past_today_charges},
+                "Future": {"rates": future_charges},
+            },
+            "seasons": seasons,
+        }
+
+    # Create shared seasons structure
+    seasons = {
+        "PastAndToday": past_and_today_season,
+        "Future": future_season,
+    }
+
     rate_plan = {
         "version": 1,
         "name": rate_plan_name,
@@ -390,30 +416,10 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
             "PastAndToday": {"rates": today_buy_charges},
             "Future": {"rates": tomorrow_buy_charges},
         },
-        "seasons": {
-            "PastAndToday": past_and_today_season,
-            "Future": future_season,
-        },
-        "sell_tariff": {
-            "name": rate_plan_name,
-            "utility": "Per hour",
-            "currency": "EUR",
-            "daily_charges": [{"amount": 0, "name": "Charge"}],
-            "demand_charges": {
-                "ALL": {"rates": {"ALL": 0}},
-                "PastAndToday": {"rates": {}},
-                "Future": {"rates": {}},
-            },
-            "energy_charges": {
-                "ALL": {"rates": {"ALL": 0}},
-                "PastAndToday": {"rates": today_sell_charges},
-                "Future": {"rates": tomorrow_sell_charges},
-            },
-            "seasons": {
-                "PastAndToday": past_and_today_season,
-                "Future": future_season,
-            },
-        },
+        "seasons": seasons,
+        "sell_tariff": create_tariff_structure(
+            rate_plan_name, today_sell_charges, tomorrow_sell_charges, seasons
+        ),
     }
     return rate_plan, today_prices, tomorrow_prices
 
