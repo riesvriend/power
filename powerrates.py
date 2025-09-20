@@ -16,9 +16,11 @@ from energy_zero_prices import fetch_energy_prices
 
 """
 
-- The goal of this script is to set the buy and sell rates for the next day into the Tesla Powerwall, using the ANWB energie API, which uses hourly rates for electricity
+- The goal of this script is to set the buy and sell rates for the next day into the Tesla Powerwall, using the
+  ANWB energie API, which uses hourly rates for electricity
 - The sell rates should be set to the Marktprijs from ANWB, the buy price should be the AllInPrijs from the ABWB api.
-- We should reference the @tesla_specs.md file for the correct rate plan structure and API endpoints, as well as the tester TestPowerwallConnectivity in  @test_powerrates.py.
+- We should reference the @tesla_specs.md file for the correct rate plan structure and API endpoints, as well as the
+  tester TestPowerwallConnectivity in  @test_powerrates.py.
 These sources are validated, the current code in this file is not and has some incorrect APIs and schema's potentially
 """
 
@@ -103,6 +105,23 @@ def get_prices_today_and_tomorrow():
     return all_prices
 
 
+def _request_tesla_tokens(data):
+    """Helper function to handle common Tesla token request logic."""
+    client_id = "ownerapi"
+    token_url = "https://auth.tesla.com/oauth2/v3/token"
+    data["client_id"] = client_id
+
+    response = requests.post(token_url, json=data)
+    response.raise_for_status()
+    tokens = response.json()
+
+    # Save the new refresh token
+    with open(REFRESH_TOKEN_FILE, "w") as f:
+        json.dump({"refresh_token": tokens["refresh_token"]}, f)
+
+    return tokens["access_token"], tokens["refresh_token"]
+
+
 def get_tesla_tokens():
     if os.path.exists(REFRESH_TOKEN_FILE):
         with open(REFRESH_TOKEN_FILE, "r") as f:
@@ -135,37 +154,22 @@ def get_tesla_tokens():
     code = query.get("code", [None])[0]
     if not code:
         raise ValueError("No code found in the URL.")
-    token_url = "https://auth.tesla.com/oauth2/v3/token"
     data = {
         "grant_type": "authorization_code",
-        "client_id": client_id,
         "code": code,
         "code_verifier": code_verifier,
         "redirect_uri": redirect_uri,
     }
-    response = requests.post(token_url, json=data)
-    response.raise_for_status()
-    tokens = response.json()
-    with open(REFRESH_TOKEN_FILE, "w") as f:
-        json.dump({"refresh_token": tokens["refresh_token"]}, f)
-    return tokens["access_token"], tokens["refresh_token"]
+    return _request_tesla_tokens(data)
 
 
 def refresh_access_token(refresh_token):
-    client_id = "ownerapi"
-    token_url = "https://auth.tesla.com/oauth2/v3/token"
     data = {
         "grant_type": "refresh_token",
-        "client_id": client_id,
         "refresh_token": refresh_token,
         "scope": "openid email offline_access",
     }
-    response = requests.post(token_url, json=data)
-    response.raise_for_status()
-    tokens = response.json()
-    with open(REFRESH_TOKEN_FILE, "w") as f:
-        json.dump({"refresh_token": tokens["refresh_token"]}, f)
-    return tokens["access_token"], tokens["refresh_token"]
+    return _request_tesla_tokens(data)
 
 
 def get_yearly_grid_import_export(base_url, energy_site_id, headers):
@@ -197,7 +201,7 @@ def get_yearly_grid_import_export(base_url, energy_site_id, headers):
         response.raise_for_status()
         data = response.json().get("response", {})
 
-        print(f"Full API Response for Yearly History: {json.dumps(data)}")
+        # print(f"Full API Response for Yearly History: {json.dumps(data)}")
 
         total_imported_wh = 0
         total_exported_wh = 0
