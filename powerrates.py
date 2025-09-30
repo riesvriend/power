@@ -28,6 +28,7 @@ These sources are validated, the current code in this file is not and has some i
 # Placeholders
 LOCAL_TZ = "Europe/Amsterdam"  # Local timezone for tariff times. MUST be an IANA-compliant name.
 REFRESH_TOKEN_FILE = "tesla_refresh_token.json"
+OVERHEAD_COST_KWH = 0.15  # EUR per kWh
 
 
 def get_prices_today_and_tomorrow():
@@ -39,7 +40,6 @@ def get_prices_today_and_tomorrow():
     now_local = datetime.now(local_tz)
     today_local = now_local.date()
     tomorrow_local = today_local + timedelta(days=1)
-    OVERHEAD_COST_KWH = 0.17  # EUR per kWh
 
     all_prices = {}
 
@@ -215,6 +215,10 @@ def get_yearly_grid_import_export(base_url, energy_site_id, headers):
         total_imported_kwh = total_imported_wh / 1000.0
         total_exported_kwh = total_exported_wh / 1000.0
 
+        # if current year is 2025, then add 5000 imported KwH; the value from before the install of the powerwall
+        if now_local.year == 2025:
+            total_imported_kwh += 5000
+
         print(
             f"Yearly grid summary: Imported={total_imported_kwh:.2f} kWh, Exported={total_exported_kwh:.2f} kWh"
         )
@@ -263,7 +267,6 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
     now_local = datetime.now(local_tz)
     today_local_date = now_local.date()
     tomorrow_local_date = today_local_date + timedelta(days=1)
-    yesterday_local_date = today_local_date - timedelta(days=1)
 
     today_prices = {}
     tomorrow_prices = {}
@@ -304,7 +307,8 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
                 sell_price = prices[hour]["sell"]
             else:
                 # Per ANWB, the sell price for consumers is the same as the buy price
-                # until they sell more than they buy in a year.
+                # until they sell more than they buy in a year. IE, we get the overhead back or prior purchases in the
+                # year. This the 'salderingsregeling' in Netherlands, valid until 2026-12-31
                 sell_price = buy_price
 
             if buy_price < sell_price:
@@ -324,7 +328,36 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
                     }
                 ]
             }
+
+        if not use_market_sell_price_flag:
+            boost_sales_price(buy_energy_charges, sell_energy_charges, tou_periods)
+
         return buy_energy_charges, sell_energy_charges, tou_periods
+
+    def boost_sales_price(buy_energy_charges, sell_energy_charges, tou_periods):
+        """We want to force the powerwall to start selling to the grid, in case we still have
+        an excess amount of energy purchages vs sold to the grid. If we bring the balance to
+        to 0 by selling back, we get a kick-back value equal to the overhead costs that was paid
+        on the purchased amount during the year.
+
+        Find 12 of the tou_periods items with the highest hourly rates and boost both the buy
+        and the sell prices by the overhead amount. This will incentify the powerwalls algorithm
+        to start selling to the grid during those high-price hours; even if there is a mostly flat rate during the day.
+        """
+
+        # Create a list of (hour_name, buy_price) tuples to find the top 8
+        hour_prices = []
+        for hour_name, buy_price in buy_energy_charges.items():
+            hour_prices.append((hour_name, buy_price))
+
+        # Sort by buy price in descending order and take top 8
+        hour_prices.sort(key=lambda x: x[1], reverse=True)
+        top_12_hours = hour_prices[:12]
+
+        # Boost both buy and sell prices for the top 12 hours
+        for hour_name, _ in top_12_hours:
+            buy_energy_charges[hour_name] += OVERHEAD_COST_KWH
+            sell_energy_charges[hour_name] += OVERHEAD_COST_KWH
 
     (
         today_buy_charges,
@@ -425,8 +458,8 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
 
 
 def convert_to_schedule_format(tou_periods):
-    print("TOU Periods:")
-    print(json.dumps(tou_periods, indent=2))
+    # print("TOU Periods:")
+    # print(json.dumps(tou_periods, indent=2))
     schedule = []
 
     # Sort by fromHour to ensure correct processing
@@ -538,8 +571,8 @@ def main():
     # Set the complete rate plan
     tariff_url = base_url + f"/api/1/energy_sites/{energy_site_id}/time_of_use_settings"
 
-    print("\n=== Payload for POST to /time_of_use_settings ===")
-    print(json.dumps(tou_payload, indent=2))
+    # print("\n=== Payload for POST to /time_of_use_settings ===")
+    # print(json.dumps(tou_payload, indent=2))
 
     try:
         print(f"\n--- Making API call to: {tariff_url} ---")
@@ -549,7 +582,7 @@ def main():
         if response.status_code == 200 or response.status_code == 201:
             response_data = response.json()
             print("✅ Rate plan updated successfully.")
-            print(f"Response: {json.dumps(response_data, indent=2)}")
+            # print(f"Response: {json.dumps(response_data, indent=2)}")
         else:
             print(f"❌ API call failed with status: {response.status_code}")
             print(f"Response text: {response.text}")
