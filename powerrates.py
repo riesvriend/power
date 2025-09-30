@@ -29,6 +29,7 @@ These sources are validated, the current code in this file is not and has some i
 LOCAL_TZ = "Europe/Amsterdam"  # Local timezone for tariff times. MUST be an IANA-compliant name.
 REFRESH_TOKEN_FILE = "tesla_refresh_token.json"
 OVERHEAD_COST_KWH = 0.15  # EUR per kWh
+BOOST_SALES_PRICES = False
 
 
 def get_prices_today_and_tomorrow():
@@ -260,13 +261,25 @@ def print_current_rate_plan(base_url: str, energy_site_id: int, headers: dict):
 
 def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price: bool):
     """
-    Configure a rate plan for today and tomorrow.
-    Today's rates are set for the current day, and tomorrow's rates are set for all other days.
+    Configure a rate plan for today and tomorrow using a single season.
+    Today's rates are assigned to today's weekday, tomorrow's rates to all other weekdays.
+    This allows the Powerwall algorithm to optimize properly within a single season.
     """
     local_tz = pytz.timezone(LOCAL_TZ)
     now_local = datetime.now(local_tz)
     today_local_date = now_local.date()
     tomorrow_local_date = today_local_date + timedelta(days=1)
+
+    # Get weekday numbers (0=Monday, 6=Sunday in Python's weekday())
+    # But Tesla uses 0=Sunday, 6=Saturday, so we need to convert:
+    # Python: Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6
+    # Tesla:  Sun=0, Mon=1, Tue=2, Wed=3, Thu=4, Fri=5, Sat=6
+    today_weekday_python = today_local_date.weekday()
+    tomorrow_weekday_python = tomorrow_local_date.weekday()
+
+    # Convert to Tesla's weekday numbering
+    today_weekday_tesla = (today_weekday_python + 1) % 7
+    tomorrow_weekday_tesla = (tomorrow_weekday_python + 1) % 7
 
     today_prices = {}
     tomorrow_prices = {}
@@ -292,65 +305,25 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
             f"Warning: Missing some hourly prices for tomorrow. Found {len(tomorrow_prices)}/24 rates."
         )
 
-    def create_hourly_rate_structure(prices, use_market_sell_price_flag: bool):
-        buy_energy_charges = {}
-        sell_energy_charges = {}
-        tou_periods = {}
-        for hour in range(24):
-            if hour not in prices:
-                continue
-
-            rate_name = f"HOUR_{hour}"
-            buy_price = prices[hour]["buy"]
-
-            if use_market_sell_price_flag:
-                sell_price = prices[hour]["sell"]
-            else:
-                # Per ANWB, the sell price for consumers is the same as the buy price
-                # until they sell more than they buy in a year. IE, we get the overhead back or prior purchases in the
-                # year. This the 'salderingsregeling' in Netherlands, valid until 2026-12-31
-                sell_price = buy_price
-
-            if buy_price < sell_price:
-                buy_price = sell_price
-
-            buy_energy_charges[rate_name] = buy_price
-            sell_energy_charges[rate_name] = sell_price
-            tou_periods[rate_name] = {
-                "periods": [
-                    {
-                        "fromDayOfWeek": 0,
-                        "toDayOfWeek": 6,
-                        "fromHour": hour,
-                        "fromMinute": 0,
-                        "toHour": hour + 1 if hour < 23 else 0,
-                        "toMinute": 0,
-                    }
-                ]
-            }
-
-        if not use_market_sell_price_flag:
-            boost_sales_price(buy_energy_charges, sell_energy_charges, tou_periods)
-
-        return buy_energy_charges, sell_energy_charges, tou_periods
-
-    def boost_sales_price(buy_energy_charges, sell_energy_charges, tou_periods):
+    def boost_sales_price(buy_energy_charges, sell_energy_charges):
         """We want to force the powerwall to start selling to the grid, in case we still have
         an excess amount of energy purchages vs sold to the grid. If we bring the balance to
         to 0 by selling back, we get a kick-back value equal to the overhead costs that was paid
         on the purchased amount during the year.
 
-        Find 12 of the tou_periods items with the highest hourly rates and boost both the buy
+        Find 12 of the rate items with the highest hourly rates and boost both the buy
         and the sell prices by the overhead amount. This will incentify the powerwalls algorithm
         to start selling to the grid during those high-price hours; even if there is a mostly flat rate during the day.
         """
+        if not BOOST_SALES_PRICES:
+            return
 
-        # Create a list of (hour_name, buy_price) tuples to find the top 8
+        # Create a list of (hour_name, buy_price) tuples to find the top 12
         hour_prices = []
         for hour_name, buy_price in buy_energy_charges.items():
             hour_prices.append((hour_name, buy_price))
 
-        # Sort by buy price in descending order and take top 8
+        # Sort by buy price in descending order and take top 12
         hour_prices.sort(key=lambda x: x[1], reverse=True)
         top_12_hours = hour_prices[:12]
 
@@ -359,55 +332,94 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
             buy_energy_charges[hour_name] += OVERHEAD_COST_KWH
             sell_energy_charges[hour_name] += OVERHEAD_COST_KWH
 
-    (
-        today_buy_charges,
-        today_sell_charges,
-        today_tou_periods,
-    ) = create_hourly_rate_structure(today_prices, use_market_sell_price)
-    (
-        tomorrow_buy_charges,
-        tomorrow_sell_charges,
-        tomorrow_tou_periods,
-    ) = create_hourly_rate_structure(tomorrow_prices, use_market_sell_price)
+    # Create combined rate structure with weekday-based periods
+    buy_energy_charges = {}
+    sell_energy_charges = {}
+    tou_periods = {}
+
+    for hour in range(24):
+        if hour not in today_prices or hour not in tomorrow_prices:
+            continue
+
+        # Create rate names for today and tomorrow
+        today_rate_name = f"TODAY_HOUR_{hour}"
+        tomorrow_rate_name = f"TOMORROW_HOUR_{hour}"
+
+        # Get prices for this hour
+        today_buy_price = today_prices[hour]["buy"]
+        today_sell_price_raw = today_prices[hour]["sell"]
+        tomorrow_buy_price = tomorrow_prices[hour]["buy"]
+        tomorrow_sell_price_raw = tomorrow_prices[hour]["sell"]
+
+        # Apply sell price logic (saldering)
+        if use_market_sell_price:
+            today_sell_price = today_sell_price_raw
+            tomorrow_sell_price = tomorrow_sell_price_raw
+        else:
+            # Per ANWB, the sell price for consumers is the same as the buy price
+            # until they sell more than they buy in a year. IE, we get the overhead back or prior purchases in the
+            # year. This the 'salderingsregeling' in Netherlands, valid until 2026-12-31
+            today_sell_price = today_buy_price
+            tomorrow_sell_price = tomorrow_buy_price
+
+        # Ensure buy >= sell
+        if today_buy_price < today_sell_price:
+            today_buy_price = today_sell_price
+        if tomorrow_buy_price < tomorrow_sell_price:
+            tomorrow_buy_price = tomorrow_sell_price
+
+        # Add today's rates (applies only to today's weekday)
+        buy_energy_charges[today_rate_name] = today_buy_price
+        sell_energy_charges[today_rate_name] = today_sell_price
+        tou_periods[today_rate_name] = {
+            "periods": [
+                {
+                    "fromDayOfWeek": today_weekday_tesla,
+                    "toDayOfWeek": today_weekday_tesla,
+                    "fromHour": hour,
+                    "fromMinute": 0,
+                    "toHour": hour + 1 if hour < 23 else 0,
+                    "toMinute": 0,
+                }
+            ]
+        }
+
+        # Add tomorrow's rates (applies to all days except today's weekday)
+        buy_energy_charges[tomorrow_rate_name] = tomorrow_buy_price
+        sell_energy_charges[tomorrow_rate_name] = tomorrow_sell_price
+
+        # Create periods for all days except today's weekday
+        periods = []
+        for weekday in range(7):
+            if weekday != today_weekday_tesla:
+                periods.append(
+                    {
+                        "fromDayOfWeek": weekday,
+                        "toDayOfWeek": weekday,
+                        "fromHour": hour,
+                        "fromMinute": 0,
+                        "toHour": hour + 1 if hour < 23 else 0,
+                        "toMinute": 0,
+                    }
+                )
+
+        tou_periods[tomorrow_rate_name] = {"periods": periods}
+
+    if not use_market_sell_price:
+        boost_sales_price(buy_energy_charges, sell_energy_charges)
 
     rate_plan_name = "Dynamic Hourly Rates"
 
-    if today_local_date.month == 12 and today_local_date.day == 31:
-        # Special handling for the last day of the year.
-        # "PastAndToday" is only today.
-        # "Future" covers the rest of the year (Jan 1 - Dec 30).
-        past_and_today_season = {
-            "fromDay": 31,
-            "toDay": 31,
-            "fromMonth": 12,
-            "toMonth": 12,
-            "tou_periods": today_tou_periods,
-        }
-        future_season = {
-            "fromDay": 1,
-            "toDay": 30,
-            "fromMonth": 1,
-            "toMonth": 12,
-            "tou_periods": tomorrow_tou_periods,
-        }
-    else:
-        # Normal daily operation.
-        past_and_today_season = {
-            "fromDay": 1,
-            "toDay": today_local_date.day,
-            "fromMonth": 1,
-            "toMonth": today_local_date.month,
-            "tou_periods": today_tou_periods,
-        }
-        future_season = {
-            "fromDay": tomorrow_local_date.day,
-            "toDay": 31,
-            "fromMonth": tomorrow_local_date.month,
-            "toMonth": 12,
-            "tou_periods": tomorrow_tou_periods,
-        }
+    # Create a single season covering the entire year
+    single_season = {
+        "fromDay": 1,
+        "toDay": 31,
+        "fromMonth": 1,
+        "toMonth": 12,
+        "tou_periods": tou_periods,
+    }
 
-    def create_tariff_structure(name, past_today_charges, future_charges, seasons):
+    def create_tariff_structure(name, energy_charges, seasons):
         """Create a tariff structure with common fields."""
         return {
             "name": name,
@@ -416,21 +428,18 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
             "daily_charges": [{"amount": 0, "name": "Charge"}],
             "demand_charges": {
                 "ALL": {"rates": {"ALL": 0}},
-                "PastAndToday": {"rates": {}},
-                "Future": {"rates": {}},
+                "AllYear": {"rates": {}},
             },
             "energy_charges": {
                 "ALL": {"rates": {"ALL": 0}},
-                "PastAndToday": {"rates": past_today_charges},
-                "Future": {"rates": future_charges},
+                "AllYear": {"rates": energy_charges},
             },
             "seasons": seasons,
         }
 
-    # Create shared seasons structure
+    # Create seasons structure with single season
     seasons = {
-        "PastAndToday": past_and_today_season,
-        "Future": future_season,
+        "AllYear": single_season,
     }
 
     rate_plan = {
@@ -441,17 +450,15 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
         "daily_charges": [{"amount": 0, "name": "Charge"}],
         "demand_charges": {
             "ALL": {"rates": {"ALL": 0}},
-            "PastAndToday": {"rates": {}},
-            "Future": {"rates": {}},
+            "AllYear": {"rates": {}},
         },
         "energy_charges": {
             "ALL": {"rates": {"ALL": 0}},
-            "PastAndToday": {"rates": today_buy_charges},
-            "Future": {"rates": tomorrow_buy_charges},
+            "AllYear": {"rates": buy_energy_charges},
         },
         "seasons": seasons,
         "sell_tariff": create_tariff_structure(
-            rate_plan_name, today_sell_charges, tomorrow_sell_charges, seasons
+            rate_plan_name, sell_energy_charges, seasons
         ),
     }
     return rate_plan, today_prices, tomorrow_prices
@@ -562,7 +569,7 @@ def main():
         print(f"  Hour {hour:02d}: Buy @ {buy_price:.4f}, Sell @ {sell_price:.4f}")
 
     schedule = convert_to_schedule_format(
-        rate_plan["seasons"]["PastAndToday"]["tou_periods"]
+        rate_plan["seasons"]["AllYear"]["tou_periods"]
     )
     tou_payload = {
         "tou_settings": {"schedule": schedule, "tariff_content_v2": rate_plan}
