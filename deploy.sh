@@ -42,7 +42,7 @@ eval "rsync -avz --delete ${EXCLUDE_OPTS} '${LOCAL_DIR}' '${REMOTE_USER}@${REMOT
 # Setup cron job on the remote server
 echo "Setting up cron job..."
 CRON_COMMAND="cd ${REMOTE_DIR} && ${PYTHON_PATH} ${MAIN_SCRIPT} >> ${LOG_FILE} 2>&1"
-CRON_JOB="0 */2 * * * ${CRON_COMMAND}"
+CRON_JOB="0 */4 * * * ${CRON_COMMAND}"
 
 ssh "${REMOTE_USER}@${REMOTE_HOST}" "
 (crontab -l 2>/dev/null | grep -v -F \"${MAIN_SCRIPT}\" ; echo \"${CRON_JOB}\") | crontab -
