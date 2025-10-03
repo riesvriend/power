@@ -270,16 +270,31 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
     today_local_date = now_local.date()
     tomorrow_local_date = today_local_date + timedelta(days=1)
 
-    # Get weekday numbers (0=Monday, 6=Sunday in Python's weekday())
-    # But Tesla uses 0=Sunday, 6=Saturday, so we need to convert:
-    # Python: Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6
-    # Tesla:  Sun=0, Mon=1, Tue=2, Wed=3, Thu=4, Fri=5, Sat=6
-    today_weekday_python = today_local_date.weekday()
-    tomorrow_weekday_python = tomorrow_local_date.weekday()
+    # Get weekday numbers
+    # Python's weekday(): Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6
+    # Tesla API appears to use the same convention based on testing
+    today_weekday = today_local_date.weekday()
+    tomorrow_weekday = tomorrow_local_date.weekday()
 
-    # Convert to Tesla's weekday numbering
-    today_weekday_tesla = (today_weekday_python + 1) % 7
-    tomorrow_weekday_tesla = (tomorrow_weekday_python + 1) % 7
+    # Map weekday numbers to day names for logging
+    day_names = [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ]
+    print(f"\n📅 Date and Weekday Assignment:")
+    print(
+        f"  Today: {today_local_date.strftime('%Y-%m-%d')} ({day_names[today_weekday]}, weekday={today_weekday})"
+    )
+    print(
+        f"  Tomorrow: {tomorrow_local_date.strftime('%Y-%m-%d')} ({day_names[tomorrow_weekday]}, weekday={tomorrow_weekday})"
+    )
+    print(f"  Today's rates will be assigned to weekday {today_weekday}")
+    print(f"  Tomorrow's rates will be assigned to all other weekdays")
 
     today_prices = {}
     tomorrow_prices = {}
@@ -374,8 +389,8 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
         tou_periods[today_rate_name] = {
             "periods": [
                 {
-                    "fromDayOfWeek": today_weekday_tesla,
-                    "toDayOfWeek": today_weekday_tesla,
+                    "fromDayOfWeek": today_weekday,
+                    "toDayOfWeek": today_weekday,
                     "fromHour": hour,
                     "fromMinute": 0,
                     "toHour": hour + 1 if hour < 23 else 0,
@@ -391,7 +406,7 @@ def configure_rate_plan_from_prices(today_tomorrow_prices, use_market_sell_price
         # Create periods for all days except today's weekday
         periods = []
         for weekday in range(7):
-            if weekday != today_weekday_tesla:
+            if weekday != today_weekday:
                 periods.append(
                     {
                         "fromDayOfWeek": weekday,
